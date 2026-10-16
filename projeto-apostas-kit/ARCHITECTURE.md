@@ -6,11 +6,12 @@ atualizado a cada etapa. Cada seção informa o **estado**:
 - **Implementado**: existe no código e tem testes que passam.
 - **Decidido**: a decisão está tomada, mas o código ainda não existe (etapa indicada).
 
-Estado atual do projeto: **Etapas 0 a 8 concluídas** (esqueleto, Model, Repository com
+Estado atual do projeto: **Etapas 0 a 9 concluídas** (esqueleto, Model, Repository com
 migrations, Service, View, Controller HTTP, autenticação com o Keycloak, mensageria SQS com
-workers, composição com Fx, configuração, logs e métricas, e os testes de concorrência e
-recuperação com três instâncias reais). Só o README (Etapa 9) ainda **não foi feito**; ver
-"Limitações e trabalho não concluído".
+workers, composição com Fx, configuração, logs e métricas, testes de concorrência e recuperação
+com três instâncias reais, e o `README.md`). O `docker compose up --build` foi executado de
+verdade e os exemplos do README foram rodados contra ele; ver "Limitações e trabalho não
+concluído" para o que não está coberto.
 
 ## 1. Mapeamento MVC + Service
 
@@ -714,8 +715,6 @@ broker inalcançável).
 
 Não concluído (previsto em `docs/PLANO.md`):
 
-- **Etapa 9:** `README.md` (pré-requisitos, variáveis, filas, aplicação e reversão das
-  migrations, exemplos de chamada).
 
 O serviço é executável (`cmd/api`) e está testado de ponta a ponta: HTTP autenticado,
 consumidor SQS, workers, publicação de eventos, migrations na partida e SIGTERM no binário
@@ -770,7 +769,7 @@ Limitações conhecidas já registradas:
   `result="concurrency_conflict"` (conflito de versão) é um alarme que deve ficar em zero; o
   conflito que existe de fato, o de idempotência, aparece como `idempotency_conflict`.
 - As migrations aplicadas na partida não têm "down" automático: a reversão é manual, com a
-  ferramenta `migrate` (ver README, Etapa 9).
+  ferramenta `migrate` (ver o `README.md`).
 - Os testes com o Keycloak real baixam a imagem (cerca de 500 MB) e sobem o IdP uma vez por
   execução (dezenas de segundos); ficam atrás da tag `integration`.
 
