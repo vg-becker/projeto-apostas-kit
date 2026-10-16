@@ -1,0 +1,250 @@
+[
+  {
+    "name": "go-spec",
+    "start": "https://go.dev/ref/spec",
+    "prefix": "https://go.dev/ref/spec",
+    "max_pages": 1
+  },
+  {
+    "name": "go-memory-model",
+    "start": "https://go.dev/ref/mem",
+    "prefix": "https://go.dev/ref/mem",
+    "max_pages": 1
+  },
+  {
+    "name": "go-effective",
+    "start": "https://go.dev/doc/effective_go",
+    "prefix": "https://go.dev/doc/effective_go",
+    "max_pages": 1
+  },
+  {
+    "name": "go-erros",
+    "start": "https://go.dev/blog/go1.13-errors",
+    "prefix": "https://go.dev/blog/go1.13-errors",
+    "max_pages": 1
+  },
+  {
+    "name": "go-database",
+    "start": "https://go.dev/doc/database/execute-transactions",
+    "prefix": "https://go.dev/doc/database/",
+    "max_pages": 12
+  },
+  {
+    "name": "go-modules",
+    "start": "https://go.dev/doc/modules/gomod-ref",
+    "prefix": "https://go.dev/doc/modules/",
+    "max_pages": 8
+  },
+  {
+    "name": "uber-go-style",
+    "start": "https://raw.githubusercontent.com/uber-go/guide/master/style.md",
+    "prefix": "https://raw.githubusercontent.com/uber-go/guide/",
+    "max_pages": 1
+  },
+  {
+    "name": "fx-guia",
+    "start": "https://uber-go.github.io/fx/",
+    "prefix": "https://uber-go.github.io/fx/",
+    "max_pages": 60
+  },
+  {
+    "name": "fx-api",
+    "start": "https://pkg.go.dev/go.uber.org/fx",
+    "prefix": "https://pkg.go.dev/go.uber.org/fx",
+    "max_pages": 3
+  },
+  {
+    "name": "fx-fxtest-api",
+    "start": "https://pkg.go.dev/go.uber.org/fx/fxtest",
+    "prefix": "https://pkg.go.dev/go.uber.org/fx/fxtest",
+    "max_pages": 1
+  },
+  {
+    "name": "dig-api",
+    "start": "https://pkg.go.dev/go.uber.org/dig",
+    "prefix": "https://pkg.go.dev/go.uber.org/dig",
+    "max_pages": 1
+  },
+  {
+    "name": "pgx-api",
+    "start": "https://pkg.go.dev/github.com/jackc/pgx/v5",
+    "prefix": "https://pkg.go.dev/github.com/jackc/pgx/v5",
+    "max_pages": 3
+  },
+  {
+    "name": "pgxpool-api",
+    "start": "https://pkg.go.dev/github.com/jackc/pgx/v5/pgxpool",
+    "prefix": "https://pkg.go.dev/github.com/jackc/pgx/v5/pgxpool",
+    "max_pages": 1
+  },
+  {
+    "name": "pgconn-api",
+    "start": "https://pkg.go.dev/github.com/jackc/pgx/v5/pgconn",
+    "prefix": "https://pkg.go.dev/github.com/jackc/pgx/v5/pgconn",
+    "max_pages": 1
+  },
+  {
+    "name": "golang-migrate",
+    "start": "https://raw.githubusercontent.com/golang-migrate/migrate/master/GETTING_STARTED.md",
+    "prefix": "https://raw.githubusercontent.com/golang-migrate/migrate/",
+    "max_pages": 1
+  },
+  {
+    "name": "golang-migrate-postgres",
+    "start": "https://raw.githubusercontent.com/golang-migrate/migrate/master/database/postgres/README.md",
+    "prefix": "https://raw.githubusercontent.com/golang-migrate/migrate/",
+    "max_pages": 1
+  },
+  {
+    "name": "pg-locking",
+    "start": "https://www.postgresql.org/docs/current/explicit-locking.html",
+    "prefix": "https://www.postgresql.org/docs/current/explicit-locking",
+    "max_pages": 1
+  },
+  {
+    "name": "pg-isolation",
+    "start": "https://www.postgresql.org/docs/current/transaction-iso.html",
+    "prefix": "https://www.postgresql.org/docs/current/transaction-iso",
+    "max_pages": 1
+  },
+  {
+    "name": "pg-select",
+    "start": "https://www.postgresql.org/docs/current/sql-select.html",
+    "prefix": "https://www.postgresql.org/docs/current/sql-select",
+    "max_pages": 1
+  },
+  {
+    "name": "pg-insert-onconflict",
+    "start": "https://www.postgresql.org/docs/current/sql-insert.html",
+    "prefix": "https://www.postgresql.org/docs/current/sql-insert",
+    "max_pages": 1
+  },
+  {
+    "name": "pg-constraints",
+    "start": "https://www.postgresql.org/docs/current/ddl-constraints.html",
+    "prefix": "https://www.postgresql.org/docs/current/ddl-constraints",
+    "max_pages": 1
+  },
+  {
+    "name": "pg-triggers",
+    "start": "https://www.postgresql.org/docs/current/plpgsql-trigger.html",
+    "prefix": "https://www.postgresql.org/docs/current/plpgsql-trigger",
+    "max_pages": 1
+  },
+  {
+    "name": "pg-createtrigger",
+    "start": "https://www.postgresql.org/docs/current/sql-createtrigger.html",
+    "prefix": "https://www.postgresql.org/docs/current/sql-createtrigger",
+    "max_pages": 1
+  },
+  {
+    "name": "pg-numeric-types",
+    "start": "https://www.postgresql.org/docs/current/datatype-numeric.html",
+    "prefix": "https://www.postgresql.org/docs/current/datatype-numeric",
+    "max_pages": 1
+  },
+  {
+    "name": "sqs-fifo",
+    "start": "https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/FIFO-queues.html",
+    "prefix": "https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/",
+    "include": "(?i)fifo|dead-letter|visibility|redrive|message-group|deduplication|long-polling|working-with-messages",
+    "max_pages": 25
+  },
+  {
+    "name": "aws-sdk-go-v2-sqs",
+    "start": "https://pkg.go.dev/github.com/aws/aws-sdk-go-v2/service/sqs",
+    "prefix": "https://pkg.go.dev/github.com/aws/aws-sdk-go-v2/service/sqs",
+    "max_pages": 1
+  },
+  {
+    "name": "localstack-sqs",
+    "start": "https://docs.localstack.cloud/aws/services/sqs/",
+    "prefix": "https://docs.localstack.cloud/aws/services/sqs/",
+    "max_pages": 1
+  },
+  {
+    "name": "keycloak-import",
+    "start": "https://www.keycloak.org/server/importExport",
+    "prefix": "https://www.keycloak.org/server/importExport",
+    "max_pages": 1
+  },
+  {
+    "name": "keycloak-containers",
+    "start": "https://www.keycloak.org/server/containers",
+    "prefix": "https://www.keycloak.org/server/containers",
+    "max_pages": 1
+  },
+  {
+    "name": "keycloak-service-accounts",
+    "start": "https://www.keycloak.org/docs/latest/server_admin/",
+    "prefix": "https://www.keycloak.org/docs/latest/server_admin/",
+    "max_pages": 1
+  },
+  {
+    "name": "go-oidc",
+    "start": "https://pkg.go.dev/github.com/coreos/go-oidc/v3/oidc",
+    "prefix": "https://pkg.go.dev/github.com/coreos/go-oidc/v3/oidc",
+    "max_pages": 1
+  },
+  {
+    "name": "oauth2-client-credentials",
+    "start": "https://pkg.go.dev/golang.org/x/oauth2/clientcredentials",
+    "prefix": "https://pkg.go.dev/golang.org/x/oauth2/clientcredentials",
+    "max_pages": 1
+  },
+  {
+    "name": "testcontainers-go",
+    "start": "https://golang.testcontainers.org/",
+    "prefix": "https://golang.testcontainers.org/",
+    "include": "(?i)postgres|localstack|keycloak|quickstart|features/|modules/(postgres|localstack|keycloak)|compose",
+    "max_pages": 20
+  },
+  {
+    "name": "prometheus-client-go",
+    "start": "https://pkg.go.dev/github.com/prometheus/client_golang/prometheus",
+    "prefix": "https://pkg.go.dev/github.com/prometheus/client_golang/prometheus",
+    "max_pages": 1
+  },
+  {
+    "name": "go-slog",
+    "start": "https://pkg.go.dev/log/slog",
+    "prefix": "https://pkg.go.dev/log/slog",
+    "max_pages": 1
+  },
+  {
+    "name": "go-net-http",
+    "start": "https://pkg.go.dev/net/http",
+    "prefix": "https://pkg.go.dev/net/http",
+    "max_pages": 1
+  },
+  {
+    "name": "go-testing",
+    "start": "https://pkg.go.dev/testing",
+    "prefix": "https://pkg.go.dev/testing",
+    "max_pages": 1
+  },
+  {
+    "name": "padrao-transactional-outbox",
+    "start": "https://microservices.io/patterns/data/transactional-outbox.html",
+    "prefix": "https://microservices.io/patterns/data/transactional-outbox",
+    "max_pages": 1
+  },
+  {
+    "name": "padrao-idempotent-consumer",
+    "start": "https://microservices.io/patterns/communication-style/idempotent-consumer.html",
+    "prefix": "https://microservices.io/patterns/communication-style/idempotent-consumer",
+    "max_pages": 1
+  },
+  {
+    "name": "go-code-review-comments",
+    "start": "https://go.dev/wiki/CodeReviewComments",
+    "prefix": "https://go.dev/wiki/CodeReviewComments",
+    "max_pages": 1
+  },
+  {
+    "name": "google-go-style",
+    "start": "https://google.github.io/styleguide/go/guide",
+    "prefix": "https://google.github.io/styleguide/go/",
+    "max_pages": 4
+  }
+]

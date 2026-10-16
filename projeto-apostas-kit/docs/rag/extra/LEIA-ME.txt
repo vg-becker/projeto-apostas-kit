@@ -1,0 +1,3 @@
+Coloque aqui suas próprias notas (.md ou .txt) que devem entrar no RAG:
+decisões, exemplos de código que você aprovou, convenções do time, etc.
+Depois rode: python3 scripts/rag/build_index.py

@@ -1,0 +1,51 @@
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - ineffassign
+    - unused
+    - errorlint
+    - lll
+    - funlen
+    - nestif
+    - gocognit
+    - revive
+    - misspell
+    - nilerr
+    - contextcheck
+    - bodyclose
+    - sqlclosecheck
+  settings:
+    lll:
+      line-length: 100
+      tab-width: 4
+    funlen:
+      lines: 30
+      statements: 20
+      ignore-comments: true
+    nestif:
+      min-complexity: 3
+    gocognit:
+      min-complexity: 10
+    revive:
+      rules:
+        - name: early-return
+        - name: indent-error-flow
+        - name: superfluous-else
+        - name: unused-parameter
+        - name: exported
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - funlen
+          - lll
+
+formatters:
+  enable:
+    - gofmt
+    - goimports

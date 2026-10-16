@@ -1,0 +1,10 @@
+.env
+.env.local
+.claude/backups/
+.claude/settings.local.json
+docs/rag/index.db
+docs/rag/raw/
+__pycache__/
+*.test
+*.out
+bin/
