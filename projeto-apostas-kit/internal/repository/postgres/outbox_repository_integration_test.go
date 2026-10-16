@@ -268,3 +268,26 @@ func TestOutboxClaimRejectsNonPositiveLimitOrLease(t *testing.T) {
 		t.Fatal("invalid claim params must be rejected")
 	}
 }
+
+func TestClaimReturnsTheEventsInTheOrderTheyOccurred(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	// inseridos fora de ordem de propósito, com instantes crescentes
+	instants := []time.Duration{4, 1, 5, 2, 3, 0, 7, 6}
+	for _, offset := range instants {
+		f.addEvent(t, baseTime.Add(offset*time.Second))
+	}
+
+	records, err := f.outbox.Claim(ctx, outboxClaim(baseTime.Add(time.Hour), 20))
+	if err != nil || len(records) != len(instants) {
+		t.Fatalf("claimed %d (%v), want %d", len(records), err, len(instants))
+	}
+
+	for index := 1; index < len(records); index++ {
+		if records[index].OccurredAt.Before(records[index-1].OccurredAt) {
+			t.Fatalf("event %d occurred at %v, before the previous one at %v: Claim must return them in order",
+				index, records[index].OccurredAt, records[index-1].OccurredAt)
+		}
+	}
+}

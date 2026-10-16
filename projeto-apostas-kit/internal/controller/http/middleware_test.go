@@ -160,9 +160,9 @@ func TestAccessLogOfAnUnmatchedRequestUsesAFixedRoute(t *testing.T) {
 	logger, logs := newLogger()
 	handler := accessLog(http.NewServeMux(), logger)
 
-	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/secret/path/42", nil))
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/secret/path/zz-private-id", nil))
 
-	if !strings.Contains(logs.String(), `"route":"unmatched"`) || strings.Contains(logs.String(), "42") {
+	if !strings.Contains(logs.String(), `"route":"unmatched"`) || strings.Contains(logs.String(), "zz-private-id") {
 		t.Fatalf("log = %s", logs.String())
 	}
 }

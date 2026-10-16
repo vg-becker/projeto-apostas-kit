@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -205,5 +206,24 @@ func collectOutboxRecords(rows pgx.Rows) ([]port.OutboxRecord, error) {
 		records = append(records, row.record())
 	}
 
-	return records, translateError(rows.Err())
+	if err := rows.Err(); err != nil {
+		return nil, translateError(err)
+	}
+
+	return inOrderOfOccurrence(records), nil
+}
+
+// inOrderOfOccurrence ordena os eventos por (occurred_at, event_id). O UPDATE ... RETURNING
+// não garante a ordem das linhas devolvidas, e o publisher precisa enviar os eventos de um
+// agregado na ordem em que aconteceram.
+func inOrderOfOccurrence(records []port.OutboxRecord) []port.OutboxRecord {
+	sort.SliceStable(records, func(left int, right int) bool {
+		if !records[left].OccurredAt.Equal(records[right].OccurredAt) {
+			return records[left].OccurredAt.Before(records[right].OccurredAt)
+		}
+
+		return records[left].EventID < records[right].EventID
+	})
+
+	return records
 }

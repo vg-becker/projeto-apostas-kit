@@ -6,10 +6,10 @@ atualizado a cada etapa. Cada seção informa o **estado**:
 - **Implementado**: existe no código e tem testes que passam.
 - **Decidido**: a decisão está tomada, mas o código ainda não existe (etapa indicada).
 
-Estado atual do projeto: **Etapas 0 a 5 concluídas** (esqueleto, Model, Repository com
-migrations, Service, View, Controller HTTP e autenticação com o Keycloak). O consumidor SQS,
-o Fx, a observabilidade completa e o README ainda **não foram feitos**; ver "Limitações e
-trabalho não concluído".
+Estado atual do projeto: **Etapas 0 a 6 concluídas** (esqueleto, Model, Repository com
+migrations, Service, View, Controller HTTP, autenticação com o Keycloak e mensageria SQS com
+workers). O Fx e o `main.go`, a observabilidade completa, os testes com três processos e o
+README ainda **não foram feitos**; ver "Limitações e trabalho não concluído".
 
 ## 1. Mapeamento MVC + Service
 
@@ -18,7 +18,7 @@ trabalho não concluído".
 | Model | `internal/model/{money,identity,wallet,ledger,wager,event,port}` | Implementado |
 | Repository | `internal/repository/postgres` | Implementado |
 | Service | `internal/service` | Implementado (Etapa 3) |
-| Controller | `internal/controller/http` | Implementado (Etapa 4); `sqs` e `worker` na Etapa 6 |
+| Controller | `internal/controller/{http,sqs,worker,wire}` | Implementado (Etapas 4 e 6) |
 | View | `internal/view/{response,presenter,problem}` | Implementado (Etapa 4) |
 | Platform | `internal/platform/{clock,idgen,...}` | Parcial: `clock` e `idgen` implementados |
 
@@ -144,7 +144,7 @@ persistir; o mapeamento para HTTP e o contrato de erro serão definidos na Etapa
   `wager_transactions_one_reversal_per_reference` sobre `resolved_reference_id` para
   reversões `PROCESSED`. Sob concorrência, a segunda reversão falha com `ErrAlreadyExists`.
 
-**Referência indisponível (Implementado no Service; o laço periódico do worker é da Etapa 6).**
+**Referência indisponível (Implementado: Service e worker periódico).**
 
 Vale para `REFUND`, `ROLLBACK` e para `WIN` com referência (esta deve ser uma BET processada
 da mesma rodada, provedor, jogador, carteira e moeda; o valor do WIN é livre; vários WINs
@@ -252,7 +252,7 @@ limitação.
   (`base64url` de um JSON com instante, ID e carteira), limite padrão 50 e máximo 200.
   O cursor é validado em formato e carteira, mas **não é assinado**.
 
-## 9. Inbox e outbox (Repositórios e publisher implementados; consumidor SQS e laço na Etapa 6)
+## 9. Inbox e outbox (Implementado)
 
 **Inbox.** `Begin` insere com `ON CONFLICT DO NOTHING`; `NEW` na primeira vez, `DUPLICATE` se
 já concluída com o mesmo hash, `HASH_CONFLICT` se o `messageId` voltou com outro conteúdo.
@@ -260,7 +260,7 @@ Duas transações concorrentes com a mesma mensagem são serializadas pela unici
 (10 entregas simultâneas resultam em exatamente um `NEW`). Uma linha existente, com hash
 igual e **não concluída**, devolve `NEW`: o tratamento é refeito em vez de a mensagem ser
 descartada. `Complete` é idempotente. O registro da inbox deve compartilhar a transação das
-alterações de domínio, e a mensagem SQS só é apagada após o commit (Etapa 6).
+alterações de domínio, e a mensagem SQS só é apagada após o commit (seção 12).
 
 **Outbox.** `Add` grava o snapshot do evento (`jsonb`) na transação do domínio, então o
 evento só existe se a transação confirmar; testes provam que um publisher não o enxerga antes
@@ -268,7 +268,10 @@ do commit nem após rollback. `Claim` usa `FOR UPDATE SKIP LOCKED` com lease: v�
 publishers disputam sem sobreposição, e um lease vencido (publisher que morreu entre publicar
 e confirmar) permite que outra instância assuma o mesmo evento. O `eventId` é estável e é
 preservado em republicações. `MarkFailed` incrementa `attempts` e agenda o backoff. O
-snapshot é imutável também no banco (trigger).
+snapshot é imutável também no banco (trigger). `Claim` devolve os eventos **em ordem de
+ocorrência** `(occurred_at, event_id)`: o `UPDATE ... RETURNING` não garante a ordem das
+linhas, então o repositório as ordena (defeito encontrado na Etapa 6, quando os eventos de uma
+carteira chegaram à fila com as versões 1, 3, 2, 4).
 
 **Contrato dos eventos (Implementado no Model):** envelope com `eventId`, `eventType`,
 `aggregateId`, `correlationId`, `causationId` opcional, `occurredAt` (UTC, RFC 3339),
@@ -291,11 +294,11 @@ metadados externos.
 tentativa com atraso dobrando de 2 s até 1 min (`PublishPolicy`: lotes de 50, lease de
 30 s). **Um evento nunca é descartado:** não há limite de tentativas, só repetição. Se o
 processo morre entre publicar e confirmar, o lease vence e outra instância republica o
-**mesmo `eventId`**; o destino deduplica por ele (na Etapa 6, `MessageDeduplicationId` =
-`eventId` e `MessageGroupId` = `aggregateId`). O cancelamento do contexto interrompe o lote;
+**mesmo `eventId`**; o destino deduplica por ele (`MessageDeduplicationId` = `eventId` e
+`MessageGroupId` = `aggregateId`, seção 12). O cancelamento do contexto interrompe o lote;
 o que já foi entregue é confirmado com um contexto próprio e o restante volta depois do lease.
-O destino real (SQS) é da Etapa 6; os testes usam um destino registrador, com banco e outbox
-reais.
+O destino real é o SQS (`sqsclient.EventPublisher`); o worker que roda o publisher é descrito
+na seção 12.
 
 **Limitações:** o `jsonb` normaliza ordem de chaves e espaços, então o payload publicado é a
 renderização do banco (equivalente ao original e idêntica em toda republicação). Com vários
@@ -400,8 +403,9 @@ curl -s http://localhost:8081/providers/provider-a/wagering/transactions/tx-1 \
 - O `auth.Authenticator` importa os tipos do Controller (`Principal` e os erros); o Controller
   não importa a plataforma, então não há ciclo.
 - Sem limite de requisições por provedor.
-- O acesso à mensageria deve ser controlado por credenciais e políticas do broker, preservando
-  as validações de domínio no consumidor. Isso é da **Etapa 6** e ainda não existe.
+- O acesso à mensageria é controlado por credenciais e políticas do broker, preservando as
+  validações de domínio no consumidor (seção 12). O `providerId` das mensagens vem do corpo, não
+  de um token: quem pode publicar na fila é uma decisão do broker.
 
 ## 11. Composição com Uber Fx e shutdown (Decidido; Etapa 7)
 
@@ -412,13 +416,177 @@ Ordem de shutdown: parar as entradas (HTTP e SQS), esperar o trabalho em andamen
 o pool do banco por último. A composição será verificada com `fxtest`. `cmd/api/main.go`
 hoje é um placeholder vazio.
 
-## 12. Mensageria SQS (Decidido; Etapa 6)
+**Peças prontas para o Fx.** O consumidor SQS e cada worker têm `Start()` (não bloqueia, devolve
+na hora) e `Stop(ctx)` (espera o trabalho em andamento até o prazo; vencido o prazo, cancela o
+contexto de trabalho, devolve `ErrShutdownTimeout` e, no consumidor, devolve as mensagens à
+fila). O worker expõe `Done()`, fechado quando o laço termina de fato, e o `Stop` é seguro
+antes do `Start` e repetido. O `OnStop` do Fx deve chamar, nesta ordem: o consumidor (para de
+receber e conclui o que está em andamento), os workers, o servidor HTTP e, por último, o pool
+do banco.
 
-O provisionamento das filas existe em `deploy/localstack/init/ready.d/01-sqs.sh`:
-`wager-transactions.fifo`, `wager-transactions-dlq.fifo` (redrive com `maxReceiveCount` 5,
-visibility timeout de 60 s) e `wager-events.fifo`, o destino dos eventos de saída. O
-consumidor, `MessageGroupId`, `MessageDeduplicationId`, limites de tentativas, backoff e
-tratamento de mensagem inválida serão definidos e documentados na Etapa 6.
+## 12. Mensageria SQS (Implementado)
+
+### Filas e provisionamento
+
+`deploy/localstack/init/ready.d/01-sqs.sh` provisiona as três filas (o Docker Compose o executa
+no LocalStack, e os testes de integração montam **este mesmo script**, então os valores abaixo
+são verificados):
+
+| Fila | Papel | Configuração |
+|---|---|---|
+| `wager-transactions.fifo` | operações dos provedores | FIFO, sem deduplicação por conteúdo, `VisibilityTimeout` 60 s, redrive para a DLQ depois de **5 recebimentos** (`maxReceiveCount`), política de acesso declarada |
+| `wager-transactions-dlq.fifo` | mensagens que não podem ser processadas | FIFO |
+| `wager-events.fifo` | eventos de saída | FIFO |
+
+Para reprovisionar manualmente: `docker compose up localstack` (ou rode o script com
+`awslocal`).
+
+### Mensagem de entrada
+
+Envelope `WagerTransactionRequested`, como no enunciado:
+
+```json
+{
+  "messageId": "msg-123",
+  "type": "WagerTransactionRequested",
+  "occurredAt": "2026-09-08T12:00:00.000Z",
+  "data": {
+    "providerId": "provider-a",
+    "externalTransactionId": "transaction-123",
+    "idempotencyKey": "provider-a:transaction-123",
+    "playerId": "0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1",
+    "walletId": "0192f291-27dd-7d3f-8071-5f8685deef37",
+    "roundId": "round-987",
+    "gameId": "fortune-chimp",
+    "kind": "BET",
+    "money": { "amount": "25.00", "currency": "BRL" }
+  }
+}
+```
+
+A validação de formato é a **mesma do HTTP** (pacote `controller/wire`, compartilhado): JSON
+estrito (sem campo desconhecido nem dados depois do JSON), até 64 KiB, `type` igual a
+`WagerTransactionRequested`, `messageId` obrigatório (até 128 caracteres, sem espaços nas
+pontas), `occurredAt` em RFC 3339, dinheiro em **texto** com `money.Parse` (número JSON é
+recusado), `OPENING` recusado. O mesmo conteúdo lógico gera **o mesmo comando e o mesmo hash**
+por HTTP e por SQS (há teste), inclusive `"25"` contra `"25.00"`. A chave de idempotência é
+`data.idempotencyKey`; o `messageId` vira correlação e causação dos eventos.
+
+### MessageGroupId e MessageDeduplicationId
+
+- **`MessageGroupId` = `walletId`:** o broker FIFO serializa as operações de uma carteira e
+  deixa as de carteiras diferentes andarem em paralelo, em linha com o lock por carteira do
+  banco. O consumidor não depende disso para a correção.
+- **`MessageDeduplicationId` = `messageId`:** a deduplicação do broker só vale **5 minutos**.
+  A idempotência durável é a **inbox** `UNIQUE (consumerName, messageId)` mais a unicidade
+  `(providerId, idempotencyKey)` do banco, que sobrevivem a reinício e valem para sempre.
+- A concorrência entre HTTP e SQS é validada: a mesma operação enviada pelas duas vias, em
+  qualquer ordem, é aplicada **uma só vez** (a segunda é um replay); a mesma chave com outro
+  conteúdo é conflito.
+
+### Consumidor (`controller/sqs`)
+
+Recebe lotes de até 10 mensagens (espera longa), trata as do mesmo grupo **em sequência** e
+grupos diferentes **em paralelo**, com no máximo 20 mensagens em voo. O tratamento de cada
+mensagem é uma única transação SQL: inbox, operação, ledger, saldo e eventos da outbox.
+
+| Resultado | Destino da mensagem |
+|---|---|
+| Aplicada, duplicata, **rejeição de negócio** ou **referência pendente** | apagada, **só depois do commit** (rejeição é resultado terminal persistido; a pendência já está persistida e o worker de referências assume) |
+| Falha **transitória** ou **desconhecida** | não apagada; a visibilidade é adiada com backoff (`RetryBase` 5 s dobrando pelo número de recebimentos até 5 min). Esgotados os **5 recebimentos**, o **broker** a move para a DLQ. |
+| **Permanente** (mensagem malformada, erro de entrada) | enviada **à DLQ pelo consumidor** na primeira tentativa, depois apagada |
+| Falha ao enviar à DLQ | tratada como transitória |
+| Falha no `Delete` depois do commit | só registrada: a mensagem volta, a inbox a reconhece como duplicata e ela é apagada |
+
+- **Limites:** 5 tentativas; `VisibilityTimeout` 60 s na fila; prazo de 30 s por mensagem
+  (abaixo da visibilidade); backoff de 5 s a 5 min. Se o tratamento passar da visibilidade e a
+  mensagem for reentregue durante o processamento, a unicidade da inbox serializa as duas e a
+  segunda vê duplicata.
+- **Mensagens inválidas:** vão direto à DLQ, com o corpo original, o grupo original e os
+  atributos `failureReason`, `originalMessageId` e `receiveCount` (só códigos e
+  identificadores, nunca texto livre de erro nem dados do payload). Motivos: `invalid_json`,
+  `too_large`, `unsupported_type`, `invalid_field` (formato ou valor), `invalid_message`
+  (`messageId` inválido), `hash_conflict` (`messageId` reutilizado com outro conteúdo),
+  `idempotency_conflict`, `wallet_not_found` e `invalid_input` (demais erros de entrada).
+- **Classificação:** um erro é permanente se o HTTP o responderia como 400, 404 ou 409, e um
+  teste de consistência garante que as duas listas não divergem. Transitório tem precedência.
+  O que não é reconhecido conta como transitório (a opção conservadora: a mensagem espera e
+  chega à DLQ pelo broker, em vez de ser descartada).
+- **SIGTERM / `Stop(ctx)`:** para de receber na hora; as mensagens recebidas e **ainda não
+  iniciadas** são devolvidas à fila (`ChangeMessageVisibility` 0); as em andamento terminam
+  dentro do prazo; vencido o prazo, o trabalho é **abandonado** (o contexto é cancelado, a
+  transação SQL faz rollback e não sobra efeito parcial) e as mensagens voltam à fila. Nada é
+  recebido depois do `Stop`.
+- **Observabilidade:** um `Observer` recebe cada desfecho (`applied`, `duplicate`, `retried`,
+  `dead_lettered`, `released`, `delete_failed`) para as métricas da Etapa 7. Os logs levam
+  `messageId`, `groupId`, `receiveCount` e o desfecho, nunca o corpo.
+
+### Eventos de saída: roteamento e consumo
+
+- **Destino:** `wager-events.fifo`. **Roteamento:** `MessageGroupId` = `aggregateId` (ordem por
+  agregado), `MessageDeduplicationId` = `eventId`. **Corpo:** o snapshot imutável da outbox (o
+  envelope da seção 9). **Atributos:** `eventType` e `eventId`.
+- **Consumo:** a entrega é **at-least-once**, e o consumidor deve **deduplicar por `eventId`**.
+  Para ordenar os eventos de uma carteira, use o `walletVersion` do `WalletBalanceChanged`.
+- **Recuperação:** se o publisher cai entre publicar e confirmar na outbox, o evento é
+  republicado depois do lease com o **mesmo `eventId`**, e o broker descarta a cópia: o
+  destino continua com uma só mensagem (há teste de ponta a ponta). Com o destino
+  indisponível, nenhum evento se perde: o publisher repete com backoff até a fila voltar.
+- **Ordem:** com um publisher e sem falhas, os eventos de um agregado chegam em ordem de
+  ocorrência. Com falhas ou vários publishers, a ordem entre eventos do mesmo agregado **não é
+  garantida** (um evento adiado por falha pode ser ultrapassado); o `walletVersion` é a fonte
+  de ordem.
+
+### Workers (`controller/worker`)
+
+| Worker | Tarefa | Espera padrão | Repete na hora enquanto |
+|---|---|---|---|
+| `outbox-publisher` | publica a outbox no SQS | 500 ms | houver eventos reivindicados |
+| `reference-resolver` | conclui `PENDING_REFERENCE` vencidas | 2 s | o lote vier cheio |
+| `pending-resumer` | retoma `PENDING` abandonadas | 5 s | o lote vier cheio |
+
+Cada espera leva um jitter de até 10%, e erros seguidos dobram a espera até 30 s (voltando ao
+normal no primeiro sucesso). Um panic na tarefa é recuperado e registrado (tipo e pilha, nunca
+o valor) e o laço continua. Várias instâncias de cada worker rodam ao mesmo tempo: o trabalho é
+reivindicado com `SKIP LOCKED` e lease.
+
+### Operação: a DLQ
+
+- Numa fila FIFO, as mensagens de um grupo em voo travam as demais do mesmo grupo. Na DLQ as
+  mensagens **mantêm o `MessageGroupId` original**, então quem a drena deve **apagar cada
+  mensagem ao recolhê-la**; senão só avança um lote por visibilidade.
+- Uma mensagem na DLQ por `invalid_json`, `unsupported_type`, `invalid_field` ou
+  `invalid_message` precisa ser corrigida na origem. `wallet_not_found` pode ser reenviada
+  depois de abrir a carteira. `hash_conflict` e `idempotency_conflict` indicam um produtor
+  reutilizando identificadores. Uma mensagem que chegou à DLQ **pelo broker** (sem
+  `failureReason`) esgotou as tentativas por falha transitória e pode ser reenviada à fila
+  principal depois que a causa passar: a inbox e a idempotência tornam o reenvio seguro.
+
+### Controle de acesso ao broker
+
+O enunciado manda controlar o acesso por credenciais e políticas do broker, preservando as
+validações de domínio no consumidor. O serviço usa credenciais próprias do SQS, a fila principal
+declara uma política restrita à conta confiável, e todas as validações de domínio (formato,
+valor, carteira, jogador, moeda, hash, idempotência) continuam no consumidor. **O LocalStack
+Community guarda a política, mas não a aplica:** localmente isso é só configuração verificada;
+a aplicação real depende do IAM da AWS. Como o SQS não carrega identidade do chamador, o
+`providerId` vem do corpo da mensagem, e quem pode publicar em nome de cada provedor é uma
+decisão da política do broker, não do serviço.
+
+### Evidência
+
+Testes de integração com **LocalStack, Postgres e (no ponta a ponta) Keycloak reais**:
+o script entregue cria as filas com os atributos do contrato; o cliente respeita ordem e
+bloqueio por grupo FIFO, a deduplicação do broker e o redrive para a DLQ; o consumidor só apaga
+depois do commit, trata a queda entre commit e remoção como duplicata, faz backoff e leva à DLQ
+as tentativas esgotadas, envia cada erro permanente à DLQ na primeira tentativa com o motivo
+certo, mantém a ordem por carteira e o paralelismo entre carteiras, e desliga limpo ou por
+prazo sem deixar efeito parcial; o publisher entrega todos os eventos uma vez, recupera-se de
+confirmação perdida, de dois publishers e de destino indisponível; o resolver e o resumer
+funcionam como workers; e um teste de ponta a ponta recebe a operação por SQS, a consulta pela
+API HTTP autenticada, confere ledger, reconciliação, isolamento entre provedores e o fluxo de
+eventos, e cruza HTTP e SQS. O `/health/ready` reflete o broker real (`UP`, fila inexistente e
+broker inalcançável).
 
 ## 13. Decisões de ambiente
 
@@ -426,6 +594,10 @@ tratamento de mensagem inválida serão definidos e documentados na Etapa 6.
 - Postgres 17, LocalStack 3.8 e Keycloak 26 no Docker Compose.
 - UUIDv7 (`google/uuid`) para os identificadores, gerados fora do Model por `port.IDGenerator`.
 - `port.Clock` injeta o tempo; timestamps sempre em UTC.
+- LocalStack 3.8 (SQS) nos testes de mensageria: a imagem tem cerca de 1 GB e o container sobe
+  uma vez por pacote de teste. Divergências do simulador observadas: aceita um corpo de
+  mensagem vazio (a AWS recusa); devolve URLs de fila com a porta interna do container (os
+  testes montam as URLs a partir do endpoint mapeado); não aplica políticas IAM.
 - Testes de integração usam Postgres real via testcontainers e aplicam as migrations reais
   com `golang-migrate`, incluindo `up`, `down` e `up`. Ficam atrás da build tag
   `integration`.
@@ -434,17 +606,16 @@ tratamento de mensagem inválida serão definidos e documentados na Etapa 6.
 
 Não concluído (previsto em `docs/PLANO.md`):
 
-- **Etapa 6:** consumidor SQS, laços dos workers (resolver, resumer, publisher), destino real
-  dos eventos e a verificação de SQS do readiness.
 - **Etapa 7:** módulos Fx, `main.go`, timeouts do `http.Server`, logs JSON configurados,
   métricas Prometheus.
 - **Etapa 8:** testes com três processos, falhas entre commit e publicação, reinício.
 - **Etapa 9:** `README.md` (pré-requisitos, variáveis, filas, aplicação e reversão das
   migrations, exemplos de chamada).
 
-Hoje **não existe consumidor SQS nem processo executável**: o serviço está pronto e testado
-até a borda HTTP, com autenticação efetiva (Keycloak real), mas o `main.go` é um placeholder,
-então nada o sobe ainda. Os itens eliminatórios que dependem das etapas acima, como os testes
+Hoje **não existe processo executável**: o serviço está pronto e testado de ponta a ponta
+(HTTP autenticado, consumidor SQS, workers e publicação de eventos), mas o `main.go` é um
+placeholder e nada compõe os componentes, então nada o sobe ainda. A composição, os módulos
+Fx e a ordem de início e de parada são da Etapa 7. Os itens eliminatórios que dependem das etapas acima, como os testes
 com três instâncias independentes, ainda não foram atendidos. Os testes de concorrência
 atuais rodam em um único processo; o teste exigido, com três processos, é da Etapa 8.
 
@@ -453,7 +624,12 @@ Limitações conhecidas já registradas:
 - Sem trigger de verificação saldo × ledger no commit (seção 7).
 - `ErrVersionConflict` cobre também carteira inexistente (seção 3).
 - Cursor de paginação não assinado (seção 8).
-- Ordem entre eventos do mesmo agregado não garantida com vários publishers (seção 9).
+- Ordem entre eventos do mesmo agregado não garantida com falhas ou vários publishers
+  (seções 9 e 12); o `walletVersion` é a fonte de ordem.
+- O consumidor não aplica contrapressão além do limite de 20 mensagens em voo; um lote lento
+  atrasa só os grupos dele, mas não há limite de taxa por provedor.
+- Dentro de um lote, um grupo lento mantém ocupados os slots em voo dele; as mensagens do mesmo
+  grupo já recebidas esperam, e as de outros grupos seguem.
 - O publisher não tem limite de tentativas nem fila morta para eventos: nenhum evento se
   perde, mas um destino permanentemente quebrado faz a outbox crescer (a métrica de atraso,
   da Etapa 7, deve alertar).
@@ -469,8 +645,8 @@ Limitações conhecidas já registradas:
   carteira) vira `FAILED` com `INFRASTRUCTURE_FAILURE`, para auditoria, sem evento: não há
   evento definido para `FAILED`.
 - Moedas limitadas a BRL, USD e EUR.
-- O readiness só tem verificação real do Postgres; a do SQS é uma porta (`port.HealthCheck`)
-  sem implementação até a Etapa 6.
+- O readiness de SQS verifica as filas de operações e de eventos (`GetQueueAttributes`); não
+  mede o atraso da outbox nem o tamanho da DLQ, que ficam para as métricas da Etapa 7.
 - Sem limite de requisições por provedor (rate limiting) e sem timeouts do servidor HTTP
   definidos ainda.
 - Os testes com o Keycloak real baixam a imagem (cerca de 500 MB) e sobem o IdP uma vez por
@@ -614,4 +790,5 @@ consultas, ledger e reconciliação); entrada hostil (JSON malformado, números 
 texto, negativos, notação científica, escala, corpo grande, tipo de mídia errado); a matriz
 de autorização; o isolamento entre provedores; a indisponibilidade de banco como 503; 50
 envios idênticos simultâneos e a disputa de duas apostas de 80,00 sobre 100,00 pela borda.
-O SQS do readiness é substituído por um stand-in nos testes, até a Etapa 6.
+O readiness dos testes de `controller/http` usa um stand-in para o SQS; o readiness com o
+broker real é verificado em `test/integration`.
