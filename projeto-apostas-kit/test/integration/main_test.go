@@ -50,6 +50,7 @@ func run(m *testing.M) int {
 	group.Wait()
 
 	defer stopAll(stopIdP, stopBroker)
+	defer removeBinary()
 
 	if keycloakErr != nil || brokerErr != nil {
 		fmt.Fprintln(os.Stderr, "integration: cannot start the environment:", keycloakErr, brokerErr)

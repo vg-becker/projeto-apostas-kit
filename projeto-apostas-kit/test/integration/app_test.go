@@ -281,7 +281,15 @@ func TestARestartInTheMiddleOfTheTrafficLosesAndDuplicatesNothing(t *testing.T) 
 		wallets[index] = first.caller(t).openWallet(t, "1000.00")
 	}
 
-	sendAll(t, environment, wallets, perWallet)
+	// as mensagens continuam chegando enquanto o processo é parado e durante a janela em que
+	// o serviço está fora do ar
+	sent := make(chan struct{})
+
+	go func() {
+		defer close(sent)
+
+		sendAll(t, environment, wallets, perWallet)
+	}()
 
 	// o gatilho olha o banco a cada poucos milissegundos para parar com trabalho em andamento
 	started := waitEvery(5*time.Millisecond, 40*time.Second, func() bool {
@@ -299,6 +307,8 @@ func TestARestartInTheMiddleOfTheTrafficLosesAndDuplicatesNothing(t *testing.T) 
 	if done >= totalMessages {
 		t.Fatalf("all %d messages were done before the stop: raise the volume so the restart is mid-flight", done)
 	}
+
+	<-sent
 
 	second := newApp(t, environment, "127.0.0.1:0")
 	second.app.RequireStart()
@@ -331,7 +341,9 @@ func sendAll(t *testing.T, environment appEnvironment, wallets []walletRef, perW
 				DeduplicationID: randomID(),
 			})
 			if err != nil {
-				t.Fatalf("send: %v", err)
+				t.Errorf("send: %v", err)
+
+				return
 			}
 		}
 	}
