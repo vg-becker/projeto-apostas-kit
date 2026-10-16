@@ -7,8 +7,13 @@ import (
 	"apostas-go/internal/service"
 )
 
-// ErrUnauthenticated indica credencial ausente, inválida ou expirada.
-var ErrUnauthenticated = errors.New("http: unauthenticated")
+var (
+	// ErrUnauthenticated indica credencial ausente, inválida ou expirada (401).
+	ErrUnauthenticated = errors.New("http: unauthenticated")
+	// ErrIdentityProviderUnavailable indica que a credencial não pôde ser verificada porque
+	// o IdP está inacessível (503), o que não prova que ela seja inválida.
+	ErrIdentityProviderUnavailable = errors.New("http: identity provider unavailable")
+)
 
 // Principal é a identidade autenticada: um provedor ou o serviço interno.
 type Principal struct {

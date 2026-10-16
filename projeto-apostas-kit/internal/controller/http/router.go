@@ -1,6 +1,8 @@
 package http
 
 import (
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -93,6 +95,13 @@ func (handler *controller) authenticate(
 	request *http.Request,
 ) (Principal, bool) {
 	principal, err := handler.Authenticator.Authenticate(request)
+	if errors.Is(err, ErrIdentityProviderUnavailable) {
+		handler.logger.Warn("authentication unavailable", "method", request.Method)
+		writeProblem(writer, problem.From(fmt.Errorf("%w: identity provider", port.ErrTransient)))
+
+		return Principal{}, false
+	}
+
 	if err != nil {
 		writeProblem(writer, problem.Unauthenticated())
 
