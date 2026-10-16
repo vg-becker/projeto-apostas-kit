@@ -36,6 +36,9 @@ services:
       KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN:-admin}
       KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin_local}
       KC_HEALTH_ENABLED: "true"
+      # Fixa o emissor (claim iss) dos tokens, não importa por onde o Keycloak é acessado:
+      # o app o alcança pela rede interna, e os clientes pelo host.
+      KC_HOSTNAME: http://localhost:${KEYCLOAK_PORT:-8080}
     ports:
       - "${KEYCLOAK_PORT:-8080}:8080"
     volumes:
@@ -65,7 +68,8 @@ services:
       SQS_QUEUE_URL: http://localstack:4566/000000000000/wager-transactions.fifo
       SQS_DLQ_URL: http://localstack:4566/000000000000/wager-transactions-dlq.fifo
       SQS_EVENTS_QUEUE_URL: http://localstack:4566/000000000000/wager-events.fifo
-      OIDC_ISSUER_URL: http://keycloak:8080/realms/apostas
+      OIDC_ISSUER_URL: http://localhost:${KEYCLOAK_PORT:-8080}/realms/apostas
+      OIDC_JWKS_URL: http://keycloak:8080/realms/apostas/protocol/openid-connect/certs
       OIDC_AUDIENCE: apostas-api
       OIDC_INTERNAL_SCOPE: wallet:internal
     ports:

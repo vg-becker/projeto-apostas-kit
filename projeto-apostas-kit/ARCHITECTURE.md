@@ -6,10 +6,10 @@ atualizado a cada etapa. Cada seção informa o **estado**:
 - **Implementado**: existe no código e tem testes que passam.
 - **Decidido**: a decisão está tomada, mas o código ainda não existe (etapa indicada).
 
-Estado atual do projeto: **Etapas 0 a 4 concluídas** (esqueleto, Model, Repository com
-migrations, Service, View e Controller HTTP). **A autenticação ainda é uma interface com
-tokens de teste**, o consumidor SQS, o Fx, a observabilidade completa e o README ainda **não
-foram feitos**; ver "Limitações e trabalho não concluído".
+Estado atual do projeto: **Etapas 0 a 5 concluídas** (esqueleto, Model, Repository com
+migrations, Service, View, Controller HTTP e autenticação com o Keycloak). O consumidor SQS,
+o Fx, a observabilidade completa e o README ainda **não foram feitos**; ver "Limitações e
+trabalho não concluído".
 
 ## 1. Mapeamento MVC + Service
 
@@ -302,25 +302,106 @@ renderização do banco (equivalente ao original e idêntica em toda republicaç
 publishers, a **ordem entre eventos do mesmo agregado não é garantida**; a entrega é
 at-least-once e o consumidor deve deduplicar por `eventId`.
 
-## 10. Autenticação e autorização (Decidido; Etapa 5)
+## 10. Autenticação e autorização (Implementado na borda HTTP; mensageria na Etapa 6)
 
-- IdP externo OAuth 2.0/OIDC: **Keycloak** com `client_credentials` entre serviços. Cadastro
-  de senhas e emissão própria de tokens estão fora do escopo.
-- Realm provisionado automaticamente em `deploy/keycloak/realm-export.json`, com os clients
-  `provider-a`, `provider-b` e `internal-service`. Os clients de provedor carregam um claim
-  fixo `provider_id`; todos recebem o audience `apostas-api`; o escopo `wallet:internal` é
-  exclusivo do `internal-service`. Os secrets do arquivo são fictícios e locais.
-- Validação do JWT (issuer, audience, expiração e assinatura via JWKS) com `go-oidc`.
-- O `providerId` vem **do token**, nunca do corpo. Provedores acessam apenas as próprias
-  transações, inclusive em replays. Operações de carteira exigem o escopo interno.
-- O acesso à mensageria é controlado por credenciais e políticas do broker, preservando as
-  validações de domínio no consumidor.
+### Escolhas e justificativa
 
-O realm e o Compose existem. No Controller, a identidade chega por uma interface
-(`http.Authenticator`, que devolve um `Principal` com `ProviderID` ou `Internal`), e as regras
-de quem pode o quê já estão implementadas e testadas (seção 16). **A implementação com JWT, o
-middleware e os testes com o Keycloak real ainda não existem (Etapa 5): hoje os endpoints
-de negócio não têm autenticação efetiva.**
+- **IdP externo: Keycloak** (OAuth 2.0 / OIDC), com `client_credentials` entre serviços. É o
+  recomendado pelo enunciado, roda em container, provisiona o realm por arquivo e emite tokens
+  JWT padrão. Cadastro de senhas e emissão própria de tokens estão fora do escopo: o serviço
+  só **valida** tokens.
+- **Biblioteca:** `go-oidc` (validação) com `go-jose` (assinatura). Não há código próprio de
+  verificação criptográfica.
+
+### Modelo de permissões
+
+| Identidade | Como é reconhecida | Pode |
+|---|---|---|
+| Provedor (`provider-a`, `provider-b`) | claim `provider_id`, fixado no realm por client | enviar operações e ler as **próprias** transações |
+| Serviço interno (`internal-service`) | escopo `wallet:internal` | abrir e ler carteiras, ledger, reconciliação, ler qualquer transação |
+
+- O `providerId` vem **do token**, nunca do corpo; um corpo com outro `providerId` é 403. O
+  claim `provider_id` é um mapper do tipo "hardcoded claim" do realm: o cliente não o
+  controla, só o administrador do realm.
+- Um token **válido sem permissão** (nem `provider_id` nem o escopo), um `provider_id` fora
+  do formato `[A-Za-z0-9._-]{1,128}` ou **os dois ao mesmo tempo** (ambíguo) não têm
+  permissão alguma: o Controller responde 403. Falha-se sempre fechando.
+- O escopo é comparado por **igualdade exata** entre os separados por espaço (`wallet:internal-x`
+  não vale).
+- Provedores acessam apenas as próprias transações, inclusive em replays (seção 15).
+
+### Validação do token (`internal/platform/auth`)
+
+- Assinatura **RS256** (só esse algoritmo: `alg: none` e a confusão RS256↔HS256 são
+  recusados), emissor (`iss`) esperado, audiência `apostas-api` e expiração.
+- **Sem descoberta:** o emissor esperado e a URL do JWKS são configurados
+  (`OIDC_ISSUER_URL`, `OIDC_JWKS_URL`), então o serviço sobe sem depender do IdP. As chaves
+  são buscadas na primeira verificação, ficam em cache e são buscadas de novo quando aparece
+  um `kid` desconhecido (rotação). Com a chave em cache, tokens válidos continuam sendo aceitos
+  mesmo com o Keycloak fora do ar.
+- Cabeçalho: só `Authorization: Bearer <token>`, um único token, sem espaços, até 8 KiB.
+
+| Situação | Resposta |
+|---|---|
+| Sem credencial, malformada, assinatura inválida, expirada, emissor ou audiência errados | **401**, com o mesmo detalhe fixo (o motivo só vai para o log, e o token nunca) |
+| Token válido sem permissão, ou ambíguo | **403** |
+| IdP inacessível e a chave necessária não está em cache | **503** com `Retry-After`: não prova que o token seja inválido |
+
+A distinção 401×503 não depende de texto de erro: o cliente HTTP do JWKS registra o instante da
+última busca que falhou (o `go-oidc` busca em segundo plano, fora do contexto de quem
+verifica), e uma verificação que falha depois disso é "indisponível". O IdP **não** entra no
+`/health/ready`: derrubar a instância por uma queda do IdP seria pior do que seguir atendendo
+com as chaves em cache.
+
+### Provisionamento e execução local
+
+- O realm `apostas` é importado de `deploy/keycloak/realm-export.json`, com os clients
+  `provider-a`, `provider-b` e `internal-service`, todos com audiência `apostas-api` (mapper) e
+  conta de serviço. Os **secrets do arquivo são fictícios e só valem em desenvolvimento**; um
+  ambiente real deve substituí-los e não versioná-los.
+- O Compose fixa `KC_HOSTNAME`, de modo que o `iss` seja sempre
+  `http://localhost:8080/realms/apostas`, e o app alcança o JWKS pela rede interna
+  (`OIDC_JWKS_URL=http://keycloak:8080/...`).
+- Obter um token e chamar a API:
+
+```bash
+TOKEN=$(curl -s http://localhost:8080/realms/apostas/protocol/openid-connect/token \
+  -d grant_type=client_credentials -d client_id=provider-a \
+  -d client_secret=provider-a-secret-local | jq -r .access_token)
+
+curl -s http://localhost:8081/providers/provider-a/wagering/transactions/tx-1 \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+  Use `client_id=internal-service` e `client_secret=internal-service-secret-local` para as
+  rotas de carteira.
+
+### Evidência
+
+- Testes com um IdP falso (sem Docker) cobrem cada classe de rejeição de forma
+  determinística: expirado, emissor e audiência errados, assinatura de outra chave, `kid`
+  desconhecido, `alg: none`, ataque de confusão HS256, payload adulterado, cabeçalhos
+  malformados, rotação de chaves, IdP fora do ar com e sem cache, e que nem o token nem seus
+  claims aparecem no log.
+- Testes de integração em `test/integration` usam o **Keycloak real**, o Postgres real e a
+  borda HTTP completa: o contrato dos claims do realm; o que cada identidade pode; credencial
+  ausente, lixo, esquema errado, assinatura quebrada, `provider_id` ou escopo trocados no
+  payload e audiência reescrita (todos 401, sem efeito financeiro); **token expirado de
+  verdade** (tempo de vida reduzido pela API de administração); token de **outro realm** e de
+  um client **sem audiência**; `providerId` do corpo diferente do token; e um JWKS inalcançável
+  dando 503, não 401. Um defeito do próprio teste foi corrigido no caminho: trocar o último
+  caractere da assinatura nem sempre a altera (em base64url ele carrega bits de
+  preenchimento); o teste agora altera um caractere do meio e confere que os bytes mudaram.
+
+### Limitações
+
+- **Revogação não é consultada** (não há introspecção): a proteção contra um token vazado é o
+  tempo de vida curto (300 s no realm). Um token revogado vale até expirar.
+- O `auth.Authenticator` importa os tipos do Controller (`Principal` e os erros); o Controller
+  não importa a plataforma, então não há ciclo.
+- Sem limite de requisições por provedor.
+- O acesso à mensageria deve ser controlado por credenciais e políticas do broker, preservando
+  as validações de domínio no consumidor. Isso é da **Etapa 6** e ainda não existe.
 
 ## 11. Composição com Uber Fx e shutdown (Decidido; Etapa 7)
 
@@ -353,8 +434,6 @@ tratamento de mensagem inválida serão definidos e documentados na Etapa 6.
 
 Não concluído (previsto em `docs/PLANO.md`):
 
-- **Etapa 5:** implementação do `Authenticator` com JWT (Keycloak, JWKS), middleware e testes
-  de autenticação com o IdP real, incluindo credenciais ausentes, inválidas e expiradas.
 - **Etapa 6:** consumidor SQS, laços dos workers (resolver, resumer, publisher), destino real
   dos eventos e a verificação de SQS do readiness.
 - **Etapa 7:** módulos Fx, `main.go`, timeouts do `http.Server`, logs JSON configurados,
@@ -363,12 +442,11 @@ Não concluído (previsto em `docs/PLANO.md`):
 - **Etapa 9:** `README.md` (pré-requisitos, variáveis, filas, aplicação e reversão das
   migrations, exemplos de chamada).
 
-Hoje **não existe autenticação efetiva, consumidor SQS nem processo executável**: o serviço
-está pronto e testado até a borda HTTP, mas o `main.go` é um placeholder e a identidade vem de
-uma interface preenchida por testes. Vários itens eliminatórios do enunciado (autenticação
-efetiva, testes com três instâncias) só serão atendidos nas etapas acima. Os testes de
-concorrência atuais rodam em um único processo; o teste exigido, com três processos
-independentes, é da Etapa 8.
+Hoje **não existe consumidor SQS nem processo executável**: o serviço está pronto e testado
+até a borda HTTP, com autenticação efetiva (Keycloak real), mas o `main.go` é um placeholder,
+então nada o sobe ainda. Os itens eliminatórios que dependem das etapas acima, como os testes
+com três instâncias independentes, ainda não foram atendidos. Os testes de concorrência
+atuais rodam em um único processo; o teste exigido, com três processos, é da Etapa 8.
 
 Limitações conhecidas já registradas:
 
@@ -395,6 +473,8 @@ Limitações conhecidas já registradas:
   sem implementação até a Etapa 6.
 - Sem limite de requisições por provedor (rate limiting) e sem timeouts do servidor HTTP
   definidos ainda.
+- Os testes com o Keycloak real baixam a imagem (cerca de 500 MB) e sobem o IdP uma vez por
+  execução (dezenas de segundos); ficam atrás da tag `integration`.
 
 ## 15. Casos de uso do Service (Implementado)
 
@@ -478,7 +558,7 @@ nunca vaza.
 | Status | `code` |
 |---|---|
 | 400 | `INVALID_REQUEST`, `INVALID_JSON`, `MISSING_IDEMPOTENCY_KEY`, `INVALID_AMOUNT`, `UNKNOWN_CURRENCY`, `INVALID_KIND`, `KIND_NOT_ALLOWED`, `WALLET_PLAYER_MISMATCH`, `CURRENCY_MISMATCH`, `INVALID_CURSOR` |
-| 401 | `UNAUTHENTICATED` |
+| 401 | `UNAUTHENTICATED` (a identidade vem do JWT validado, seção 10) |
 | 403 | `FORBIDDEN`, `PROVIDER_MISMATCH` |
 | 404 | `WALLET_NOT_FOUND`, `TRANSACTION_NOT_FOUND`, `ROUTE_NOT_FOUND` |
 | 405 | `METHOD_NOT_ALLOWED` (com `Allow`) |
