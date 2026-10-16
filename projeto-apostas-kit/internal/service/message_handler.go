@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"apostas-go/internal/model/port"
 )
@@ -46,6 +47,18 @@ func (handler *MessageHandler) Handle(
 		return InboundResult{}, err
 	}
 
+	started := time.Now()
+	result, err := handler.handle(ctx, message)
+
+	observeMessage(handler.dependencies.Operations.observer, message, started, result, err)
+
+	return result, err
+}
+
+func (handler *MessageHandler) handle(
+	ctx context.Context,
+	message InboundMessage,
+) (InboundResult, error) {
 	hash, err := CanonicalHash(message.Command)
 	if err != nil {
 		return InboundResult{}, fmt.Errorf("%w: %w", ErrInvalidMessage, err)
@@ -102,7 +115,7 @@ func (handler *MessageHandler) apply(
 	ctx context.Context,
 	message InboundMessage,
 ) (InboundResult, error) {
-	operation, err := handler.dependencies.Operations.Process(ctx, message.Command)
+	operation, err := handler.dependencies.Operations.process(ctx, message.Command)
 	if err != nil {
 		return InboundResult{}, err
 	}
@@ -128,4 +141,30 @@ func validateMessageID(messageID string) error {
 	}
 
 	return nil
+}
+
+// observeMessage observa o tratamento de uma mensagem depois do commit (ou da falha).
+func observeMessage(
+	observer Observer,
+	message InboundMessage,
+	started time.Time,
+	result InboundResult,
+	err error,
+) {
+	if err == nil && result.Outcome == InboundDuplicate {
+		observer.ObserveOperation(OperationObservation{
+			Source:        SourceMessage,
+			Kind:          string(message.Command.Kind),
+			Result:        ResultDuplicate,
+			ProviderID:    message.Command.ProviderID,
+			WalletID:      message.Command.WalletID.String(),
+			CorrelationID: message.Command.CorrelationID,
+			MessageID:     message.MessageID,
+			Duration:      time.Since(started),
+		})
+
+		return
+	}
+
+	observeCommand(observer, SourceMessage, message.Command, started, result.Operation, err)
 }

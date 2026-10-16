@@ -643,3 +643,65 @@ func (environment appEnvironment) deadLetterReasons() map[string]int {
 
 	return reasons
 }
+
+// Cada operação deixa uma linha de log com os identificadores de rastreio e uma contagem nas
+// métricas, sem vazar o valor, o saldo nem a chave de idempotência.
+func TestTheApplicationLogsAndCountsEachOperationWithoutLeakingValues(t *testing.T) {
+	running := newApp(t, newAppEnvironment(t), "127.0.0.1:0")
+	running.app.RequireStart()
+
+	defer running.app.RequireStop()
+
+	caller := running.caller(t)
+	wallet := caller.openWallet(t, "1000.00")
+
+	response := caller.call(
+		t, http.MethodPost, "/wagering/transactions", bearer(t, "provider-a"),
+		map[string]string{"Idempotency-Key": "provider-a:tx-secret-key", "X-Correlation-Id": "corr-e2e-1"},
+		operationBody(wallet, "provider-a", "tx-e2e-1", "25.00"),
+	)
+	if response.status != http.StatusOK {
+		t.Fatalf("operation = %d %s", response.status, response.body)
+	}
+
+	transactionID := response.object(t)["transactionId"].(string)
+	line := operationLogLine(t, running.logs.String(), transactionID)
+
+	for field, want := range map[string]string{
+		"source": "request", "kind": "BET", "result": "applied", "status": "PROCESSED",
+		"providerId": "provider-a", "walletId": wallet.id, "correlationId": "corr-e2e-1",
+	} {
+		if line[field] != want {
+			t.Fatalf("log %s = %v, want %s (line %v)", field, line[field], want, line)
+		}
+	}
+
+	for _, forbidden := range []string{"25.00", "975.00", "tx-secret-key"} {
+		if strings.Contains(running.logs.String(), forbidden) {
+			t.Fatalf("the logs leak %q", forbidden)
+		}
+	}
+
+	output := metricsOf(t, "http://"+running.runtime.Addr())
+
+	want := `operations_total{failure_code="",kind="BET",result="applied",source="request",status="PROCESSED"} 1`
+	if !strings.Contains(output, want) {
+		t.Fatalf("missing %q in the metrics:\n%s", want, output)
+	}
+}
+
+func operationLogLine(t *testing.T, logs string, transactionID string) map[string]any {
+	t.Helper()
+
+	for _, text := range strings.Split(logs, "\n") {
+		var line map[string]any
+		if json.Unmarshal([]byte(text), &line) == nil && line["msg"] == "operation" &&
+			line["transactionId"] == transactionID {
+			return line
+		}
+	}
+
+	t.Fatalf("no operation log line for %s in:\n%s", transactionID, logs)
+
+	return nil
+}

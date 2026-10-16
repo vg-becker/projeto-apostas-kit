@@ -43,6 +43,7 @@ type harness struct {
 	queries         *service.QueryService
 	messages        func(outbox port.OutboxRepository) *service.MessageHandler
 	handler         *service.MessageHandler
+	observed        *recordingObserver
 	transactions    *postgres.TransactionRepository
 	newPublisher    func(
 		destination port.EventPublisher,
@@ -81,6 +82,7 @@ func newHarnessWithPolicy(t *testing.T, policy service.ReferencePolicy) *harness
 	t.Helper()
 
 	stepping := &steppingClock{instant: baseTime}
+	observed := &recordingObserver{}
 	pool := postgresdb.Start(t)
 	connection := postgres.NewConnection(pool)
 	manager := postgres.NewTransactionManager(pool)
@@ -95,6 +97,7 @@ func newHarnessWithPolicy(t *testing.T, policy service.ReferencePolicy) *harness
 			Outbox:       selected,
 			Clock:        stepping,
 			IDs:          idgen.Generator{},
+			Observer:     observed,
 		})
 	}
 
@@ -108,6 +111,7 @@ func newHarnessWithPolicy(t *testing.T, policy service.ReferencePolicy) *harness
 			Clock:           stepping,
 			IDs:             idgen.Generator{},
 			ReferencePolicy: policy,
+			Observer:        observed,
 		}
 	}
 
@@ -128,6 +132,7 @@ func newHarnessWithPolicy(t *testing.T, policy service.ReferencePolicy) *harness
 	return &harness{
 		messages:        messages,
 		handler:         messages(outbox),
+		observed:        observed,
 		pool:            pool,
 		wallets:         build(outbox),
 		ids:             idgen.Generator{},

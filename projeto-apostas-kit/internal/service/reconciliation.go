@@ -25,6 +25,21 @@ func (service *WalletService) ReconcileWallet(
 	ctx context.Context,
 	id identity.WalletID,
 ) (ReconciliationResult, error) {
+	result, err := service.reconcile(ctx, id)
+	if err == nil {
+		service.observer.ObserveReconciliation(ReconciliationObservation{
+			WalletID:   id.String(),
+			Consistent: result.Consistent,
+		})
+	}
+
+	return result, err
+}
+
+func (service *WalletService) reconcile(
+	ctx context.Context,
+	id identity.WalletID,
+) (ReconciliationResult, error) {
 	found, err := service.GetWallet(ctx, id)
 	if err != nil {
 		return ReconciliationResult{}, err

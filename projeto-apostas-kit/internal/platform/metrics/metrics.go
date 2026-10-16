@@ -24,10 +24,11 @@ var requestDurationBuckets = []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5,
 
 // Metrics reúne as métricas do serviço sobre um registro próprio (não o global).
 type Metrics struct {
-	registry *prometheus.Registry
-	http     httpMetrics
-	consumer consumerMetrics
-	workers  workerMetrics
+	registry   *prometheus.Registry
+	http       httpMetrics
+	consumer   consumerMetrics
+	workers    workerMetrics
+	operations operationMetrics
 }
 
 type httpMetrics struct {
@@ -48,10 +49,11 @@ type workerMetrics struct {
 // New cria o registro com as métricas do processo (Go e sistema) e as do serviço.
 func New() *Metrics {
 	metrics := &Metrics{
-		registry: prometheus.NewRegistry(),
-		http:     newHTTPMetrics(),
-		consumer: newConsumerMetrics(),
-		workers:  newWorkerMetrics(),
+		registry:   prometheus.NewRegistry(),
+		http:       newHTTPMetrics(),
+		consumer:   newConsumerMetrics(),
+		workers:    newWorkerMetrics(),
+		operations: newOperationMetrics(),
 	}
 
 	metrics.registry.MustRegister(
@@ -64,6 +66,7 @@ func New() *Metrics {
 		metrics.workers.iterations,
 		metrics.workers.duration,
 	)
+	metrics.registry.MustRegister(metrics.operations.collectors()...)
 
 	return metrics
 }

@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"time"
 
 	"apostas-go/internal/model/wager"
 )
@@ -40,7 +41,13 @@ func (engine *operationEngine) processClaimed(
 	var failures []error
 
 	for _, pending := range claimed {
+		started := time.Now()
 		result, concluded, err := engine.completeClaimed(ctx, pending, expected)
+
+		if err != nil || concluded {
+			observeClaimed(engine.observer, sourceOf(expected), pending, started, result, err)
+		}
+
 		if err != nil {
 			failures = append(failures, err)
 
@@ -51,6 +58,14 @@ func (engine *operationEngine) processClaimed(
 	}
 
 	return summary, errors.Join(failures...)
+}
+
+func sourceOf(expected wager.Status) string {
+	if expected == wager.PendingReference {
+		return SourcePendingReference
+	}
+
+	return SourcePending
 }
 
 func (engine *operationEngine) completeClaimed(

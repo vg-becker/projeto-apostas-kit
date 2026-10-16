@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"apostas-go/internal/model/port"
 	"apostas-go/internal/model/wallet"
@@ -20,6 +21,8 @@ type OperationServiceDependencies struct {
 	Clock           port.Clock
 	IDs             port.IDGenerator
 	ReferencePolicy ReferencePolicy
+	// Observer é opcional e recebe o resultado de cada processamento.
+	Observer Observer
 }
 
 // operationEngine concentra a regra de aplicação de uma operação sobre uma carteira já
@@ -27,12 +30,14 @@ type OperationServiceDependencies struct {
 type operationEngine struct {
 	dependencies OperationServiceDependencies
 	policy       ReferencePolicy
+	observer     Observer
 }
 
 func newOperationEngine(dependencies OperationServiceDependencies) *operationEngine {
 	return &operationEngine{
 		dependencies: dependencies,
 		policy:       dependencies.ReferencePolicy.withDefaults(),
+		observer:     observerOrNoop(dependencies.Observer),
 	}
 }
 
@@ -53,6 +58,20 @@ func NewOperationService(dependencies OperationServiceDependencies) *OperationSe
 // PENDING_REFERENCE. Falhas transitórias voltam como erro (IsTransient) e podem ser
 // repetidas com a mesma chave.
 func (service *OperationService) Process(
+	ctx context.Context,
+	command ProcessOperationCommand,
+) (OperationResult, error) {
+	started := time.Now()
+	result, err := service.process(ctx, command)
+
+	observeCommand(service.observer, SourceRequest, command, started, result, err)
+
+	return result, err
+}
+
+// process é Process sem a observação: o tratamento de mensagens a usa dentro da transação da
+// inbox e observa só depois do commit.
+func (service *OperationService) process(
 	ctx context.Context,
 	command ProcessOperationCommand,
 ) (OperationResult, error) {

@@ -13,9 +13,11 @@ import (
 	"apostas-go/internal/platform/clock"
 	"apostas-go/internal/platform/config"
 	"apostas-go/internal/platform/idgen"
+	"apostas-go/internal/platform/logging"
 	"apostas-go/internal/platform/metrics"
 	"apostas-go/internal/platform/sqsclient"
 	"apostas-go/internal/repository/postgres"
+	"apostas-go/internal/service"
 )
 
 const databaseConnectTimeout = 10 * time.Second
@@ -34,6 +36,7 @@ var PlatformModule = fx.Module(
 		newSQSHealthCheck,
 		newAuthenticator,
 		newMetrics,
+		newServiceObserver,
 	),
 )
 
@@ -101,4 +104,9 @@ func newMetrics(
 	}
 
 	return registry, nil
+}
+
+// newServiceObserver entrega cada observação do Service às métricas e ao log.
+func newServiceObserver(registry *metrics.Metrics, logger *slog.Logger) service.Observer {
+	return service.CombineObservers(registry, logging.NewOperationLogger(logger))
 }

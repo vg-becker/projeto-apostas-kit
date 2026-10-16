@@ -11,6 +11,7 @@ import (
 
 	"apostas-go/internal/controller/sqs"
 	"apostas-go/internal/controller/worker"
+	"apostas-go/internal/service"
 )
 
 func scrape(t *testing.T, metrics *Metrics) string {
@@ -150,5 +151,61 @@ func TestAFailingSourceOnlyOmitsItsOwnMetric(t *testing.T) {
 
 	if !strings.Contains(output, "sqs_dead_letter_queue_messages 2") || !strings.Contains(output, "go_goroutines") {
 		t.Fatalf("the other metrics must keep being served:\n%s", output)
+	}
+}
+
+func TestOperationsAreCountedByPathResultStatusAndFailureCode(t *testing.T) {
+	metrics := New()
+
+	for _, observation := range []service.OperationObservation{
+		{Source: service.SourceRequest, Kind: "BET", Result: service.ResultApplied, Status: "PROCESSED", Duration: time.Millisecond},
+		{Source: service.SourceRequest, Kind: "BET", Result: service.ResultReplay, Status: "PROCESSED"},
+		{Source: service.SourceMessage, Kind: "BET", Result: service.ResultApplied, Status: "REJECTED", FailureCode: "INSUFFICIENT_FUNDS"},
+		{Source: service.SourceMessage, Kind: "BET", Result: service.ResultDuplicate},
+		{Source: service.SourceRequest, Kind: "BET", Result: service.ResultIdempotencyConflict},
+		// identificadores nunca viram rótulo
+		{Source: service.SourceRequest, Kind: "BET", Result: service.ResultApplied, Status: "PROCESSED", WalletID: "wallet-secret", ProviderID: "provider-secret", TransactionID: "tx-secret"},
+	} {
+		metrics.ObserveOperation(observation)
+	}
+
+	output := scrape(t, metrics)
+
+	for _, want := range []string{
+		`operations_total{failure_code="",kind="BET",result="applied",source="request",status="PROCESSED"} 2`,
+		`operations_total{failure_code="",kind="BET",result="replay",source="request",status="PROCESSED"} 1`,
+		`operations_total{failure_code="INSUFFICIENT_FUNDS",kind="BET",result="applied",source="message",status="REJECTED"} 1`,
+		`operations_total{failure_code="",kind="BET",result="duplicate",source="message",status=""} 1`,
+		`operations_total{failure_code="",kind="BET",result="idempotency_conflict",source="request",status=""} 1`,
+		`operation_duration_seconds_count{result="applied",source="request"} 2`,
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("missing %q in:\n%s", want, output)
+		}
+	}
+
+	for _, forbidden := range []string{"wallet-secret", "provider-secret", "tx-secret"} {
+		if strings.Contains(output, forbidden) {
+			t.Fatalf("identifier %q leaked into the metrics", forbidden)
+		}
+	}
+}
+
+func TestReconciliationDivergencesAreCounted(t *testing.T) {
+	metrics := New()
+
+	metrics.ObserveReconciliation(service.ReconciliationObservation{WalletID: "w1", Consistent: true})
+	metrics.ObserveReconciliation(service.ReconciliationObservation{WalletID: "w2", Consistent: false})
+
+	output := scrape(t, metrics)
+
+	for _, want := range []string{
+		`reconciliations_total{result="consistent"} 1`,
+		`reconciliations_total{result="divergent"} 1`,
+		"reconciliation_divergences_total 1",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("missing %q in:\n%s", want, output)
+		}
 	}
 }

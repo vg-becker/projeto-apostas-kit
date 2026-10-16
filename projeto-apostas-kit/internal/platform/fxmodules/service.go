@@ -39,6 +39,7 @@ type operationInputs struct {
 	Outbox       *postgres.OutboxRepository
 	Clock        port.Clock
 	IDs          port.IDGenerator
+	Observer     service.Observer
 }
 
 func newOperationDependencies(inputs operationInputs) service.OperationServiceDependencies {
@@ -50,6 +51,7 @@ func newOperationDependencies(inputs operationInputs) service.OperationServiceDe
 		Outbox:       inputs.Outbox,
 		Clock:        inputs.Clock,
 		IDs:          inputs.IDs,
+		Observer:     inputs.Observer,
 	}
 }
 
@@ -62,6 +64,7 @@ func newWalletService(shared service.OperationServiceDependencies) *service.Wall
 		Outbox:       shared.Outbox,
 		Clock:        shared.Clock,
 		IDs:          shared.IDs,
+		Observer:     shared.Observer,
 	})
 }
 

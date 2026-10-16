@@ -21,16 +21,22 @@ type WalletServiceDependencies struct {
 	Outbox       port.OutboxRepository
 	Clock        port.Clock
 	IDs          port.IDGenerator
+	// Observer é opcional e recebe o resultado de cada reconciliação.
+	Observer Observer
 }
 
 // WalletService executa os casos de uso de carteira: abertura, leitura e reconciliação.
 type WalletService struct {
 	dependencies WalletServiceDependencies
+	observer     Observer
 }
 
 // NewWalletService cria o serviço.
 func NewWalletService(dependencies WalletServiceDependencies) *WalletService {
-	return &WalletService{dependencies: dependencies}
+	return &WalletService{
+		dependencies: dependencies,
+		observer:     observerOrNoop(dependencies.Observer),
+	}
 }
 
 // openingPlan é tudo que a abertura grava, montado antes de abrir a transação SQL.
