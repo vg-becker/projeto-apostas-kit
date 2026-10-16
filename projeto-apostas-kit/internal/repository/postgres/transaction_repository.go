@@ -15,7 +15,7 @@ import (
 const insertTransaction = `
 	INSERT INTO wager_transactions (` + transactionColumnsInsert + `)
 	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-	        $11, $12, $13, $14, $15, $16, $17, $18, $19)
+	        $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
 `
 
 // transactionColumnsInsert segue a ordem de transactionColumns, sem os casts de leitura.
@@ -38,7 +38,9 @@ const transactionColumnsInsert = `
 	       failure_code,
 	       result_balance_minor_units,
 	       created_at,
-	       updated_at
+	       updated_at,
+	       correlation_id,
+	       causation_id
 `
 
 const updateTransaction = `
@@ -112,6 +114,12 @@ const claimDuePendingReferences = `
 	 WHERE id IN (SELECT id FROM claimed)
 	RETURNING ` + transactionColumns
 
+const selectReferenceAttempts = `
+	SELECT reference_attempts
+	  FROM wager_transactions
+	 WHERE id = $1
+`
+
 const scheduleReferenceRetry = `
 	UPDATE wager_transactions
 	   SET reference_attempts = reference_attempts + 1,
@@ -140,11 +148,17 @@ func (repository *TransactionRepository) Insert(
 	ctx context.Context,
 	transaction *wager.Transaction,
 ) error {
-	snapshot := transaction.Snapshot()
-
 	_, err := repository.connection.Querier(ctx).Exec(
 		ctx,
 		insertTransaction,
+		insertArguments(transaction.Snapshot())...,
+	)
+
+	return translateError(err)
+}
+
+func insertArguments(snapshot wager.Snapshot) []any {
+	return []any{
 		snapshot.ID.String(),
 		snapshot.Kind.String(),
 		snapshot.Status.String(),
@@ -164,9 +178,9 @@ func (repository *TransactionRepository) Insert(
 		nullableMinorUnits(snapshot.ResultBalance),
 		snapshot.CreatedAt,
 		snapshot.UpdatedAt,
-	)
-
-	return translateError(err)
+		nullableText(snapshot.CorrelationID),
+		nullableText(snapshot.CausationID),
+	}
 }
 
 // Update grava o desfecho da transação e libera o lease.
@@ -272,6 +286,21 @@ func (repository *TransactionRepository) ClaimDuePendingReferences(
 	params port.ClaimParams,
 ) ([]*wager.Transaction, error) {
 	return repository.claim(ctx, claimDuePendingReferences, params)
+}
+
+// ReferenceAttempts devolve o total de tentativas já agendadas para a referência.
+func (repository *TransactionRepository) ReferenceAttempts(
+	ctx context.Context,
+	id identity.TransactionID,
+) (int, error) {
+	var attempts int
+
+	row := repository.connection.Querier(ctx).QueryRow(ctx, selectReferenceAttempts, id.String())
+	if err := row.Scan(&attempts); err != nil {
+		return 0, translateError(err)
+	}
+
+	return attempts, nil
 }
 
 // ScheduleReferenceRetry registra mais uma tentativa e devolve o total acumulado.

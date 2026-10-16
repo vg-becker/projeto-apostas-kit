@@ -249,3 +249,46 @@ func TestALockedWalletDoesNotBlockAnotherWallet(t *testing.T) {
 		t.Fatalf("locked wallet error after release = %v", err)
 	}
 }
+
+// TestRepeatedRoundsOfIdenticalSubmissionsNeverReportAFalseConflict cobre uma corrida
+// que já ocorreu: uma requisição que enxergava a operação recém-confirmada por outra
+// recebia ErrIdempotencyConflict em vez do replay.
+func TestRepeatedRoundsOfIdenticalSubmissionsNeverReportAFalseConflict(t *testing.T) {
+	h := newHarness(t)
+	target := h.openFunded(t, 1000000)
+
+	const rounds, copies = 12, 16
+
+	for round := range rounds {
+		command := operation(t, target, wager.Bet, fmt.Sprintf("round-%d", round), 100)
+		commands := make([]service.ProcessOperationCommand, copies)
+		for index := range commands {
+			commands[index] = command
+		}
+
+		if originals := countOriginals(t, h.submitConcurrently(commands)); originals != 1 {
+			t.Fatalf("round %d: %d original results, want exactly 1", round, originals)
+		}
+	}
+
+	if h.ledgerEntries(t, target.ID(), "DEBIT") != rounds {
+		t.Fatalf("debits = %d, want one per round", h.ledgerEntries(t, target.ID(), "DEBIT"))
+	}
+}
+
+func countOriginals(t *testing.T, outcomes []processed) int {
+	t.Helper()
+
+	originals := 0
+	for _, outcome := range outcomes {
+		if outcome.err != nil {
+			t.Fatalf("error = %v", outcome.err)
+		}
+
+		if !outcome.result.IdempotentReplay {
+			originals++
+		}
+	}
+
+	return originals
+}

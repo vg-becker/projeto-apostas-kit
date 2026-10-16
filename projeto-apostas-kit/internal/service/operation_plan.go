@@ -1,59 +1,59 @@
 package service
 
 import (
-	"fmt"
 	"time"
 
 	"apostas-go/internal/model/identity"
 	"apostas-go/internal/model/wager"
 )
 
-// operationPlan é tudo que a operação precisa, calculado antes de abrir a transação SQL.
+// operationPlan é tudo que a operação precisa para ser aplicada: a transação (nova ou já
+// persistida), o hash do conteúdo e os identificadores dos registros que ela pode gerar.
 type operationPlan struct {
-	command       ProcessOperationCommand
-	hash          string
-	transaction   *wager.Transaction
-	entryID       identity.EntryID
-	eventIDs      [2]identity.EventID
-	correlationID string
-	receivedAt    time.Time
+	transaction *wager.Transaction
+	hash        string
+	entryID     identity.EntryID
+	eventIDs    [2]identity.EventID
 }
 
-// plan valida a entrada e prepara a transação PENDING e os identificadores. Nada aqui
-// toca o banco: entrada inválida ou não suportada não deixa rastro.
-func (service *OperationService) plan(command ProcessOperationCommand) (operationPlan, error) {
+// planFromCommand valida a entrada e prepara a transação PENDING. Nada aqui toca o banco:
+// entrada inválida não deixa rastro.
+func (engine *operationEngine) planFromCommand(
+	command ProcessOperationCommand,
+) (operationPlan, error) {
 	hash, err := CanonicalHash(command)
 	if err != nil {
 		return operationPlan{}, err
 	}
 
-	transactionID, err := service.dependencies.IDs.NewTransactionID()
+	transactionID, err := engine.dependencies.IDs.NewTransactionID()
 	if err != nil {
 		return operationPlan{}, err
 	}
 
-	receivedAt := service.dependencies.Clock.Now()
-
-	transaction, err := wager.NewExternal(externalParams(command, transactionID, hash, receivedAt))
+	transaction, err := wager.NewExternal(
+		externalParams(command, transactionID, hash, engine.dependencies.Clock.Now()),
+	)
 	if err != nil {
 		return operationPlan{}, err
 	}
 
-	if isUnsupported(command) {
-		return operationPlan{}, fmt.Errorf("%w: %s", ErrUnsupportedOperation, command.Kind)
-	}
-
-	return service.completePlan(operationPlan{
-		command:       command,
-		hash:          hash,
-		transaction:   transaction,
-		correlationID: correlationOf(command, transactionID),
-		receivedAt:    receivedAt,
-	})
+	return engine.newPlan(transaction, hash)
 }
 
-func (service *OperationService) completePlan(plan operationPlan) (operationPlan, error) {
-	ids := service.dependencies.IDs
+// planFromTransaction prepara a retomada de uma transação já persistida.
+func (engine *operationEngine) planFromTransaction(
+	transaction *wager.Transaction,
+) (operationPlan, error) {
+	return engine.newPlan(transaction, transaction.Snapshot().PayloadHash)
+}
+
+func (engine *operationEngine) newPlan(
+	transaction *wager.Transaction,
+	hash string,
+) (operationPlan, error) {
+	ids := engine.dependencies.IDs
+	plan := operationPlan{transaction: transaction, hash: hash}
 
 	entryID, err := ids.NewEntryID()
 	if err != nil {
@@ -70,6 +70,20 @@ func (service *OperationService) completePlan(plan operationPlan) (operationPlan
 	}
 
 	return plan, nil
+}
+
+// correlationID devolve o identificador de correlação original ou, na falta dele, o ID da
+// transação.
+func (plan operationPlan) correlationID() string {
+	if correlation := plan.transaction.CorrelationID(); correlation != "" {
+		return correlation
+	}
+
+	return plan.transaction.ID().String()
+}
+
+func (plan operationPlan) causationID() string {
+	return plan.transaction.CausationID()
 }
 
 func externalParams(
@@ -91,23 +105,17 @@ func externalParams(
 		Kind:                           command.Kind,
 		Money:                          command.Money,
 		ReferenceExternalTransactionID: command.ReferenceExternalTransactionID,
+		CorrelationID:                  command.CorrelationID,
+		CausationID:                    command.CausationID,
 		Now:                            now,
 	}
 }
 
-func correlationOf(command ProcessOperationCommand, id identity.TransactionID) string {
-	if command.CorrelationID != "" {
-		return command.CorrelationID
-	}
-
-	return id.String()
-}
-
-// appliedAt devolve o instante da aplicação, nunca anterior ao do recebimento, mesmo que o
-// relógio de parede tenha recuado.
-func appliedAt(now time.Time, receivedAt time.Time) time.Time {
-	if now.Before(receivedAt) {
-		return receivedAt
+// appliedAt devolve o instante da aplicação, nunca anterior à última atualização da
+// transação, mesmo que o relógio de parede tenha recuado.
+func appliedAt(now time.Time, lastUpdate time.Time) time.Time {
+	if now.Before(lastUpdate) {
+		return lastUpdate
 	}
 
 	return now

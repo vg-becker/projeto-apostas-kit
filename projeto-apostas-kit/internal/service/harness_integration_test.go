@@ -5,6 +5,7 @@ package service_test
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,7 +15,6 @@ import (
 	"apostas-go/internal/model/identity"
 	"apostas-go/internal/model/money"
 	"apostas-go/internal/model/port"
-	"apostas-go/internal/platform/clock"
 	"apostas-go/internal/platform/idgen"
 	"apostas-go/internal/repository/postgres"
 	"apostas-go/internal/service"
@@ -36,11 +36,41 @@ type harness struct {
 
 	operations      *service.OperationService
 	buildOperations func(outbox port.OutboxRepository) *service.OperationService
+	clock           *steppingClock
+	policy          service.ReferencePolicy
+	resolver        func() *service.ReferenceResolver
+}
+
+// steppingClock é um relógio de teste que só anda quando o teste manda.
+type steppingClock struct {
+	mutex   sync.Mutex
+	instant time.Time
+}
+
+func (clock *steppingClock) Now() time.Time {
+	clock.mutex.Lock()
+	defer clock.mutex.Unlock()
+
+	return clock.instant
+}
+
+func (clock *steppingClock) Advance(duration time.Duration) {
+	clock.mutex.Lock()
+	defer clock.mutex.Unlock()
+
+	clock.instant = clock.instant.Add(duration)
 }
 
 func newHarness(t *testing.T) *harness {
 	t.Helper()
 
+	return newHarnessWithPolicy(t, service.ReferencePolicy{})
+}
+
+func newHarnessWithPolicy(t *testing.T, policy service.ReferencePolicy) *harness {
+	t.Helper()
+
+	stepping := &steppingClock{instant: baseTime}
 	pool := postgresdb.Start(t)
 	connection := postgres.NewConnection(pool)
 	manager := postgres.NewTransactionManager(pool)
@@ -53,21 +83,26 @@ func newHarness(t *testing.T) *harness {
 			Operations:   postgres.NewTransactionRepository(connection),
 			Ledger:       postgres.NewLedgerRepository(connection),
 			Outbox:       selected,
-			Clock:        clock.Fixed{Instant: baseTime},
+			Clock:        stepping,
 			IDs:          idgen.Generator{},
 		})
 	}
 
+	dependencies := func(selected port.OutboxRepository) service.OperationServiceDependencies {
+		return service.OperationServiceDependencies{
+			Transactions:    manager,
+			Wallets:         postgres.NewWalletRepository(connection),
+			Operations:      postgres.NewTransactionRepository(connection),
+			Ledger:          postgres.NewLedgerRepository(connection),
+			Outbox:          selected,
+			Clock:           stepping,
+			IDs:             idgen.Generator{},
+			ReferencePolicy: policy,
+		}
+	}
+
 	buildOperations := func(selected port.OutboxRepository) *service.OperationService {
-		return service.NewOperationService(service.OperationServiceDependencies{
-			Transactions: manager,
-			Wallets:      postgres.NewWalletRepository(connection),
-			Operations:   postgres.NewTransactionRepository(connection),
-			Ledger:       postgres.NewLedgerRepository(connection),
-			Outbox:       selected,
-			Clock:        clock.Fixed{Instant: baseTime},
-			IDs:          idgen.Generator{},
-		})
+		return service.NewOperationService(dependencies(selected))
 	}
 
 	return &harness{
@@ -78,6 +113,11 @@ func newHarness(t *testing.T) *harness {
 		build:           build,
 		operations:      buildOperations(outbox),
 		buildOperations: buildOperations,
+		clock:           stepping,
+		policy:          policy,
+		resolver: func() *service.ReferenceResolver {
+			return service.NewReferenceResolver(dependencies(outbox))
+		},
 	}
 }
 

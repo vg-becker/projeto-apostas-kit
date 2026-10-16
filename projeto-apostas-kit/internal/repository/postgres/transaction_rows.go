@@ -30,7 +30,9 @@ const transactionColumns = `
 	       failure_code,
 	       result_balance_minor_units,
 	       created_at,
-	       updated_at
+	       updated_at,
+	       correlation_id,
+	       causation_id
 `
 
 // transactionRow recebe uma linha de wager_transactions; colunas anuláveis usam ponteiros.
@@ -54,6 +56,8 @@ type transactionRow struct {
 	resultBalance       *int64
 	createdAt           time.Time
 	updatedAt           time.Time
+	correlationID       *string
+	causationID         *string
 }
 
 func (row *transactionRow) destinations() []any {
@@ -77,6 +81,8 @@ func (row *transactionRow) destinations() []any {
 		&row.resultBalance,
 		&row.createdAt,
 		&row.updatedAt,
+		&row.correlationID,
+		&row.causationID,
 	}
 }
 
@@ -114,6 +120,8 @@ func (row *transactionRow) snapshot(amount money.Money, resultBalance money.Mone
 		Status:                         wager.Status(row.status),
 		FailureCode:                    wager.FailureCode(textOrEmpty(row.failureCode)),
 		ResultBalance:                  resultBalance,
+		CorrelationID:                  textOrEmpty(row.correlationID),
+		CausationID:                    textOrEmpty(row.causationID),
 		CreatedAt:                      row.createdAt,
 		UpdatedAt:                      row.updatedAt,
 	}

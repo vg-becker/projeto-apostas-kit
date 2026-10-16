@@ -14,7 +14,6 @@ var (
 	ErrIdempotencyConflict  = errors.New("service: idempotency key reused with different content")
 	ErrWalletPlayerMismatch = errors.New("service: wallet belongs to another player")
 	ErrCurrencyMismatch     = errors.New("service: operation currency differs from wallet currency")
-	ErrUnsupportedOperation = errors.New("service: operation kind is not supported yet")
 )
 
 // IsTransient informa se o erro é uma indisponibilidade temporária da infraestrutura:

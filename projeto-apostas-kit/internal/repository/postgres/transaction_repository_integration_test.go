@@ -422,3 +422,54 @@ func TestScheduleRetryOnUnknownTransactionIsNotFound(t *testing.T) {
 		t.Fatalf("error = %v, want %v", err, port.ErrNotFound)
 	}
 }
+
+func TestCorrelationMetadataRoundTrip(t *testing.T) {
+	f := newFixture(t)
+	target := f.openWallet(t, 100000)
+	params := f.externalParams(t, target, wager.Bet, "bet-1", 2500, baseTime)
+	params.CorrelationID = "correlation-1"
+	params.CausationID = "message-1"
+	bet := f.newExternal(t, params)
+	f.insertTransaction(t, bet)
+
+	stored, err := f.transactions.FindByID(context.Background(), bet.ID())
+
+	if err != nil || stored.CorrelationID() != "correlation-1" || stored.CausationID() != "message-1" {
+		t.Fatalf("stored = %+v (%v)", stored.Snapshot(), err)
+	}
+}
+
+func TestReferenceAttemptsFollowTheSchedule(t *testing.T) {
+	f := newFixture(t)
+	target := f.openWallet(t, 100000)
+	refund := f.newReversalFor(t, target, wager.Refund, "refund-1", "missing-bet")
+	f.insertTransaction(t, refund)
+	ctx := context.Background()
+
+	before, err := f.transactions.ReferenceAttempts(ctx, refund.ID())
+	if err != nil || before != 0 {
+		t.Fatalf("attempts before = %d (%v), want 0", before, err)
+	}
+
+	if err := refund.AwaitReference(baseTime); err != nil {
+		t.Fatalf("AwaitReference error = %v", err)
+	}
+
+	if err := f.transactions.Update(ctx, refund); err != nil {
+		t.Fatalf("Update error = %v", err)
+	}
+
+	if _, err := f.transactions.ScheduleReferenceRetry(ctx, refund.ID(), baseTime); err != nil {
+		t.Fatalf("Schedule error = %v", err)
+	}
+
+	after, err := f.transactions.ReferenceAttempts(ctx, refund.ID())
+	if err != nil || after != 1 {
+		t.Fatalf("attempts after = %d (%v), want 1", after, err)
+	}
+
+	missing, _ := f.ids.NewTransactionID()
+	if _, err := f.transactions.ReferenceAttempts(ctx, missing); !errors.Is(err, port.ErrNotFound) {
+		t.Fatalf("unknown error = %v, want %v", err, port.ErrNotFound)
+	}
+}

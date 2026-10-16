@@ -18,7 +18,7 @@ func processedEvents(
 	at time.Time,
 ) ([]event.Event, error) {
 	processed, err := event.NewWagerTransactionProcessed(
-		plan.header(plan.eventIDs[0], plan.command.CausationID, at),
+		plan.header(plan.eventIDs[0], plan.causationID(), at),
 		plan.transaction,
 	)
 	if err != nil {
@@ -44,7 +44,7 @@ func processedEvents(
 
 func rejectedEvents(plan operationPlan, at time.Time) ([]event.Event, error) {
 	rejected, err := event.NewWagerTransactionRejected(
-		plan.header(plan.eventIDs[0], plan.command.CausationID, at),
+		plan.header(plan.eventIDs[0], plan.causationID(), at),
 		plan.transaction,
 	)
 	if err != nil {
@@ -54,6 +54,18 @@ func rejectedEvents(plan operationPlan, at time.Time) ([]event.Event, error) {
 	return []event.Event{rejected}, nil
 }
 
+func pendingReferenceEvents(plan operationPlan, at time.Time) ([]event.Event, error) {
+	pending, err := event.NewWagerTransactionPendingReference(
+		plan.header(plan.eventIDs[0], plan.causationID(), at),
+		plan.transaction,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return []event.Event{pending}, nil
+}
+
 func (plan operationPlan) header(
 	eventID identity.EventID,
 	causationID string,
@@ -61,15 +73,15 @@ func (plan operationPlan) header(
 ) event.Header {
 	return event.Header{
 		EventID:       eventID,
-		CorrelationID: plan.correlationID,
+		CorrelationID: plan.correlationID(),
 		CausationID:   causationID,
 		Now:           at,
 	}
 }
 
-func (service *OperationService) enqueue(ctx context.Context, events []event.Event) error {
+func (engine *operationEngine) enqueue(ctx context.Context, events []event.Event) error {
 	for _, pending := range events {
-		if err := service.dependencies.Outbox.Add(ctx, pending); err != nil {
+		if err := engine.dependencies.Outbox.Add(ctx, pending); err != nil {
 			return err
 		}
 	}

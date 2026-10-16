@@ -426,31 +426,6 @@ func TestWalletMismatchesAreInputErrorsAndPersistNothing(t *testing.T) {
 	}
 }
 
-func TestKindsNotSupportedYetPersistNothing(t *testing.T) {
-	h := newHarness(t)
-	target := h.openFunded(t, 100000)
-	transactionsBefore := h.count(t, `SELECT count(*) FROM wager_transactions`)
-
-	refund := operation(t, target, wager.Refund, "refund-1", 2500)
-	refund.ReferenceExternalTransactionID = "bet-1"
-	rollback := operation(t, target, wager.Rollback, "rollback-1", 2500)
-	rollback.ReferenceExternalTransactionID = "bet-1"
-	win := operation(t, target, wager.Win, "win-1", 2500)
-	win.ReferenceExternalTransactionID = "bet-1"
-
-	for _, command := range []service.ProcessOperationCommand{refund, rollback, win} {
-		_, err := h.operations.Process(context.Background(), command)
-
-		if !errors.Is(err, service.ErrUnsupportedOperation) {
-			t.Fatalf("%s: error = %v, want %v", command.Kind, err, service.ErrUnsupportedOperation)
-		}
-	}
-
-	if h.count(t, `SELECT count(*) FROM wager_transactions`) != transactionsBefore {
-		t.Fatal("unsupported kinds must not persist anything")
-	}
-}
-
 func TestStoredHashEqualsTheCanonicalHash(t *testing.T) {
 	h := newHarness(t)
 	target := h.openFunded(t, 100000)

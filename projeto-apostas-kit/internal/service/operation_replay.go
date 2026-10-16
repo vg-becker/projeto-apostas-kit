@@ -9,41 +9,58 @@ import (
 	"apostas-go/internal/model/wager"
 )
 
-// findReplay decide se a operação já existe. Mesma chave e mesmo hash: devolve o resultado
-// persistido. Mesma chave com outro conteúdo, ou o mesmo ID externo sob outra chave:
-// ErrIdempotencyConflict, pois uma operação não pode ser reaplicada com outra identidade.
-func (service *OperationService) findReplay(
+// findReplayByKey procura a operação pela chave de idempotência. Mesma chave e mesmo hash:
+// devolve o resultado persistido. Mesma chave com outro conteúdo: ErrIdempotencyConflict.
+// Sem lock da carteira, só esta consulta é segura: o ID externo é verificado depois, sob o
+// lock, onde as duas leituras enxergam o mesmo estado confirmado.
+func (engine *operationEngine) findReplayByKey(
 	ctx context.Context,
 	plan operationPlan,
 ) (OperationResult, bool, error) {
-	command := plan.command
+	transaction := plan.transaction
 
-	existing, err := service.dependencies.Operations.FindByIdempotencyKey(
+	existing, err := engine.dependencies.Operations.FindByIdempotencyKey(
 		ctx,
-		command.ProviderID,
-		command.IdempotencyKey,
+		transaction.ProviderID(),
+		transaction.Snapshot().IdempotencyKey,
 	)
-	if err == nil {
-		return replayOf(existing, plan)
+	if errors.Is(err, port.ErrNotFound) {
+		return OperationResult{}, false, nil
 	}
 
-	if !errors.Is(err, port.ErrNotFound) {
+	if err != nil {
 		return OperationResult{}, false, err
 	}
 
-	return service.rejectReusedExternalID(ctx, plan)
+	return replayOf(existing, plan)
 }
 
-func (service *OperationService) rejectReusedExternalID(
+// findReplay acrescenta à consulta por chave a regra de que o mesmo ID externo não pode ser
+// reaplicado sob outra chave (ErrIdempotencyConflict). Deve rodar com a carteira bloqueada:
+// as operações da mesma carteira são serializadas, então não há confirmação concorrente
+// entre as duas leituras.
+func (engine *operationEngine) findReplay(
 	ctx context.Context,
 	plan operationPlan,
 ) (OperationResult, bool, error) {
-	command := plan.command
+	result, found, err := engine.findReplayByKey(ctx, plan)
+	if err != nil || found {
+		return result, found, err
+	}
 
-	_, err := service.dependencies.Operations.FindByProviderExternalID(
+	return engine.rejectReusedExternalID(ctx, plan)
+}
+
+func (engine *operationEngine) rejectReusedExternalID(
+	ctx context.Context,
+	plan operationPlan,
+) (OperationResult, bool, error) {
+	transaction := plan.transaction
+
+	_, err := engine.dependencies.Operations.FindByProviderExternalID(
 		ctx,
-		command.ProviderID,
-		command.ExternalTransactionID,
+		transaction.ProviderID(),
+		transaction.ExternalTransactionID(),
 	)
 	if errors.Is(err, port.ErrNotFound) {
 		return OperationResult{}, false, nil
@@ -56,8 +73,8 @@ func (service *OperationService) rejectReusedExternalID(
 	return OperationResult{}, false, fmt.Errorf(
 		"%w: %s/%s already exists under another idempotency key",
 		ErrIdempotencyConflict,
-		command.ProviderID,
-		command.ExternalTransactionID,
+		transaction.ProviderID(),
+		transaction.ExternalTransactionID(),
 	)
 }
 
@@ -69,7 +86,7 @@ func replayOf(
 		return OperationResult{}, false, fmt.Errorf(
 			"%w: key %s",
 			ErrIdempotencyConflict,
-			plan.command.IdempotencyKey,
+			plan.transaction.Snapshot().IdempotencyKey,
 		)
 	}
 

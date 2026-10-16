@@ -33,6 +33,8 @@ type Snapshot struct {
 	Status                         Status
 	FailureCode                    FailureCode
 	ResultBalance                  money.Money
+	CorrelationID                  string
+	CausationID                    string
 	CreatedAt                      time.Time
 	UpdatedAt                      time.Time
 }
@@ -51,7 +53,11 @@ type ExternalParams struct {
 	Kind                           Kind
 	Money                          money.Money
 	ReferenceExternalTransactionID string
-	Now                            time.Time
+	// CorrelationID e CausationID são opcionais; ficam gravados para que eventos emitidos
+	// depois da requisição (resolução de referência) mantenham o rastreio original.
+	CorrelationID string
+	CausationID   string
+	Now           time.Time
 }
 
 // OpeningParams reúne os dados da abertura interna de uma carteira.
@@ -93,6 +99,8 @@ func NewExternal(params ExternalParams) (*Transaction, error) {
 		Kind:                           params.Kind,
 		Money:                          params.Money,
 		ReferenceExternalTransactionID: params.ReferenceExternalTransactionID,
+		CorrelationID:                  params.CorrelationID,
+		CausationID:                    params.CausationID,
 		Status:                         Pending,
 		CreatedAt:                      params.Now,
 		UpdatedAt:                      params.Now,
@@ -225,6 +233,12 @@ func (transaction *Transaction) ExternalTransactionID() string {
 // RoundID devolve a rodada; vazio em OPENING.
 func (transaction *Transaction) RoundID() string { return transaction.snapshot.RoundID }
 
+// CorrelationID devolve o identificador de correlação original; vazio se não informado.
+func (transaction *Transaction) CorrelationID() string { return transaction.snapshot.CorrelationID }
+
+// CausationID devolve o identificador de causa original; vazio se não informado.
+func (transaction *Transaction) CausationID() string { return transaction.snapshot.CausationID }
+
 // ReferenceExternalTransactionID devolve a referência externa, se houver.
 func (transaction *Transaction) ReferenceExternalTransactionID() string {
 	return transaction.snapshot.ReferenceExternalTransactionID
@@ -335,6 +349,8 @@ func validateOpening(snapshot Snapshot) error {
 		snapshot.RoundID,
 		snapshot.GameID,
 		snapshot.ReferenceExternalTransactionID,
+		snapshot.CorrelationID,
+		snapshot.CausationID,
 	}
 	for _, text := range external {
 		if text != "" {
@@ -365,6 +381,10 @@ func validateExternalFields(snapshot Snapshot) error {
 
 	if !validHash(snapshot.PayloadHash) {
 		return invalid("payload hash must be a lowercase SHA-256 hex digest")
+	}
+
+	if !validOptionalText(snapshot.CorrelationID) || !validOptionalText(snapshot.CausationID) {
+		return invalid("correlation and causation ids are malformed")
 	}
 
 	return validateReference(snapshot)
@@ -448,6 +468,10 @@ func validateFailed(snapshot Snapshot) error {
 
 func validText(text string) bool {
 	return text != "" && len(text) <= maxTextLength && strings.TrimSpace(text) == text
+}
+
+func validOptionalText(text string) bool {
+	return text == "" || validText(text)
 }
 
 func validHash(text string) bool {

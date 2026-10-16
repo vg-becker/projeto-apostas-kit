@@ -6,41 +6,57 @@ import (
 	"fmt"
 
 	"apostas-go/internal/model/port"
-	"apostas-go/internal/model/wager"
 	"apostas-go/internal/model/wallet"
 )
 
-// OperationServiceDependencies reúne o que OperationService precisa; todas são portas.
+// OperationServiceDependencies reúne o que os casos de uso de operação precisam; todas
+// são portas do model. ReferencePolicy é opcional (campos zerados assumem os padrões).
 type OperationServiceDependencies struct {
-	Transactions port.TxManager
-	Wallets      port.WalletRepository
-	Operations   port.TransactionRepository
-	Ledger       port.LedgerRepository
-	Outbox       port.OutboxRepository
-	Clock        port.Clock
-	IDs          port.IDGenerator
+	Transactions    port.TxManager
+	Wallets         port.WalletRepository
+	Operations      port.TransactionRepository
+	Ledger          port.LedgerRepository
+	Outbox          port.OutboxRepository
+	Clock           port.Clock
+	IDs             port.IDGenerator
+	ReferencePolicy ReferencePolicy
+}
+
+// operationEngine concentra a regra de aplicação de uma operação sobre uma carteira já
+// bloqueada; OperationService e ReferenceResolver a compartilham.
+type operationEngine struct {
+	dependencies OperationServiceDependencies
+	policy       ReferencePolicy
+}
+
+func newOperationEngine(dependencies OperationServiceDependencies) *operationEngine {
+	return &operationEngine{
+		dependencies: dependencies,
+		policy:       dependencies.ReferencePolicy.withDefaults(),
+	}
 }
 
 // OperationService processa as operações dos provedores; HTTP e SQS usam o mesmo caso de uso.
 type OperationService struct {
-	dependencies OperationServiceDependencies
+	*operationEngine
 }
 
 // NewOperationService cria o serviço.
 func NewOperationService(dependencies OperationServiceDependencies) *OperationService {
-	return &OperationService{dependencies: dependencies}
+	return &OperationService{operationEngine: newOperationEngine(dependencies)}
 }
 
 // Process aplica uma operação de forma idempotente. A entrada é validada antes de tocar o
 // banco; depois, uma única transação resolve replay ou conflito, bloqueia a carteira, aplica
 // a regra do domínio e grava transação, ledger, saldo e eventos da outbox. Rejeições de
-// negócio voltam como resultado persistido. Falhas transitórias voltam como erro
-// (IsTransient) e podem ser repetidas com a mesma chave.
+// negócio voltam como resultado persistido, e uma referência ainda indisponível volta como
+// PENDING_REFERENCE. Falhas transitórias voltam como erro (IsTransient) e podem ser
+// repetidas com a mesma chave.
 func (service *OperationService) Process(
 	ctx context.Context,
 	command ProcessOperationCommand,
 ) (OperationResult, error) {
-	plan, err := service.plan(command)
+	plan, err := service.planFromCommand(command)
 	if err != nil {
 		return OperationResult{}, err
 	}
@@ -63,73 +79,72 @@ func (service *OperationService) Process(
 	return result, nil
 }
 
-func (service *OperationService) processInsideTransaction(
+func (engine *operationEngine) processInsideTransaction(
 	ctx context.Context,
 	plan operationPlan,
 ) (OperationResult, error) {
-	replay, found, err := service.findReplay(ctx, plan)
+	replay, found, err := engine.findReplayByKey(ctx, plan)
 	if err != nil || found {
 		return replay, err
 	}
 
-	return service.processUnderWalletLock(ctx, plan)
+	return engine.processUnderWalletLock(ctx, plan)
 }
 
 // processUnderWalletLock bloqueia só a carteira da operação; a consulta de replay é
 // repetida sob o lock, pois outra requisição igual pode ter confirmado nesse intervalo.
-func (service *OperationService) processUnderWalletLock(
+func (engine *operationEngine) processUnderWalletLock(
 	ctx context.Context,
 	plan operationPlan,
 ) (OperationResult, error) {
-	target, err := service.dependencies.Wallets.GetForUpdate(ctx, plan.command.WalletID)
+	walletID := plan.transaction.WalletID()
+
+	target, err := engine.dependencies.Wallets.GetForUpdate(ctx, walletID)
 	if err != nil {
-		return OperationResult{}, translateWalletLookup(err, plan.command.WalletID)
+		return OperationResult{}, translateWalletLookup(err, walletID)
 	}
 
-	if err := checkWalletMatches(target, plan.command); err != nil {
+	if err := checkWalletMatches(target, plan); err != nil {
 		return OperationResult{}, err
 	}
 
-	replay, found, err := service.findReplay(ctx, plan)
+	replay, found, err := engine.findReplay(ctx, plan)
 	if err != nil || found {
 		return replay, err
 	}
 
-	return service.applyNew(ctx, plan, target)
+	return engine.applyNew(ctx, plan, target)
 }
 
-func checkWalletMatches(target *wallet.Wallet, command ProcessOperationCommand) error {
-	if target.PlayerID() != command.PlayerID {
+func checkWalletMatches(target *wallet.Wallet, plan operationPlan) error {
+	transaction := plan.transaction
+
+	if target.PlayerID() != transaction.PlayerID() {
 		return fmt.Errorf("%w: wallet %s", ErrWalletPlayerMismatch, target.ID())
 	}
 
-	if target.Currency() != command.Money.Currency() {
+	if target.Currency() != transaction.Money().Currency() {
 		return fmt.Errorf(
 			"%w: wallet %s, operation %s",
 			ErrCurrencyMismatch,
 			target.Currency(),
-			command.Money.Currency(),
+			transaction.Money().Currency(),
 		)
 	}
 
 	return nil
 }
 
-func translateOperationInsert(err error, command ProcessOperationCommand) error {
+func translateOperationInsert(err error, plan operationPlan) error {
 	if errors.Is(err, port.ErrAlreadyExists) {
 		return fmt.Errorf(
 			"%w: %s/%s: %w",
 			ErrIdempotencyConflict,
-			command.ProviderID,
-			command.ExternalTransactionID,
+			plan.transaction.ProviderID(),
+			plan.transaction.ExternalTransactionID(),
 			err,
 		)
 	}
 
 	return err
-}
-
-func isUnsupported(command ProcessOperationCommand) bool {
-	return command.Kind.IsReversal() ||
-		(command.Kind == wager.Win && command.ReferenceExternalTransactionID != "")
 }

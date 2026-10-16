@@ -35,6 +35,9 @@ type TransactionRepository interface {
 		ctx context.Context,
 		params ClaimParams,
 	) ([]*wager.Transaction, error)
+	// ReferenceAttempts devolve quantas vezes a espera pela referência foi reagendada;
+	// o Service usa o total para definir o atraso e aplicar o limite de tentativas.
+	ReferenceAttempts(ctx context.Context, id identity.TransactionID) (int, error)
 	// ScheduleReferenceRetry agenda a próxima tentativa e devolve o total de tentativas,
 	// para o Service aplicar o limite de tentativas e o TTL.
 	ScheduleReferenceRetry(
