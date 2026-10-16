@@ -83,6 +83,28 @@ func TestLoadReadsOverrides(t *testing.T) {
 	}
 }
 
+func TestMigrationsAreOffByDefaultAndConfigurable(t *testing.T) {
+	config, err := Load(lookupOf(validEnvironment()))
+	if err != nil || config.Migrations.OnStart || config.Migrations.Directory != "migrations" {
+		t.Fatalf("defaults = %+v, %v", config.Migrations, err)
+	}
+
+	values := validEnvironment()
+	values["APP_MIGRATE_ON_START"] = "true"
+	values["APP_MIGRATIONS_DIR"] = "/migrations"
+
+	config, err = Load(lookupOf(values))
+	if err != nil || !config.Migrations.OnStart || config.Migrations.Directory != "/migrations" {
+		t.Fatalf("configured = %+v, %v", config.Migrations, err)
+	}
+
+	values["APP_MIGRATE_ON_START"] = "maybe"
+
+	if _, err := Load(lookupOf(values)); err == nil || !strings.Contains(err.Error(), "APP_MIGRATE_ON_START") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
 func TestLoadTreatsABlankVariableAsMissing(t *testing.T) {
 	values := validEnvironment()
 	values["APP_HTTP_ADDR"] = "   "

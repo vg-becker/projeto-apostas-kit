@@ -37,6 +37,14 @@ func Start(t testing.TB) *pgxpool.Pool {
 	return pool
 }
 
+// StartEmpty sobe um Postgres 17 sem nenhuma migration e devolve a URL de conexão, para os
+// testes que precisam aplicar as migrations por conta própria (a partida do serviço).
+func StartEmpty(t testing.TB) string {
+	t.Helper()
+
+	return startContainer(t)
+}
+
 func startContainer(t testing.TB) string {
 	t.Helper()
 

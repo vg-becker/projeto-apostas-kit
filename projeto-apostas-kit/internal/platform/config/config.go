@@ -19,6 +19,7 @@ const (
 	defaultHTTPAddr        = ":8081"
 	defaultShutdownTimeout = 30 * time.Second
 	defaultLogLevel        = "info"
+	defaultMigrationsDir   = "migrations"
 
 	defaultReadHeaderTimeout = 5 * time.Second
 	defaultReadTimeout       = 15 * time.Second
@@ -31,6 +32,7 @@ type Config struct {
 	HTTP        HTTP
 	LogLevel    slog.Level
 	DatabaseURL Secret
+	Migrations  Migrations
 	SQS         sqsclient.Config
 	Queues      sqsclient.Queues
 	Auth        auth.Config
@@ -47,6 +49,14 @@ type HTTP struct {
 	IdleTimeout       time.Duration
 }
 
+// Migrations controla a aplicação das migrations na partida. Fica desligada por padrão:
+// aplicar o schema sozinho em produção é uma escolha de quem opera, não algo que subir o
+// serviço deva fazer por padrão.
+type Migrations struct {
+	OnStart   bool
+	Directory string
+}
+
 // FromEnvironment lê a configuração das variáveis de ambiente do processo.
 func FromEnvironment() (Config, error) {
 	return Load(os.LookupEnv)
@@ -61,6 +71,7 @@ func Load(lookup LookupFunc) (Config, error) {
 		HTTP:        loadHTTP(source),
 		LogLevel:    loadLogLevel(source),
 		DatabaseURL: loadDatabaseURL(source),
+		Migrations:  loadMigrations(source),
 		SQS:         loadSQS(source),
 		Queues:      loadQueues(source),
 		Auth:        loadAuth(source),
@@ -119,6 +130,13 @@ func loadDatabaseURL(source *reader) Secret {
 	}
 
 	return Secret(raw)
+}
+
+func loadMigrations(source *reader) Migrations {
+	return Migrations{
+		OnStart:   source.boolean("APP_MIGRATE_ON_START", false),
+		Directory: source.text("APP_MIGRATIONS_DIR", defaultMigrationsDir),
+	}
 }
 
 func isPostgresScheme(scheme string) bool {

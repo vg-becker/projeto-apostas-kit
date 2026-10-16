@@ -60,6 +60,8 @@ services:
         condition: service_healthy
     environment:
       APP_HTTP_ADDR: ":8081"
+      APP_MIGRATE_ON_START: "true"
+      APP_MIGRATIONS_DIR: /migrations
       DATABASE_URL: postgres://${POSTGRES_USER:-apostas}:${POSTGRES_PASSWORD:-apostas_local}@postgres:5432/${POSTGRES_DB:-apostas}?sslmode=disable
       AWS_REGION: us-east-1
       AWS_ACCESS_KEY_ID: test

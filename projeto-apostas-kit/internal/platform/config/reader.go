@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -46,6 +47,22 @@ func (source *reader) duration(name string, fallback time.Duration) time.Duratio
 	parsed, err := time.ParseDuration(raw)
 	if err != nil || parsed <= 0 {
 		source.fail(fmt.Errorf("%s must be a positive duration such as 30s", name))
+
+		return fallback
+	}
+
+	return parsed
+}
+
+func (source *reader) boolean(name string, fallback bool) bool {
+	raw := source.text(name, "")
+	if raw == "" {
+		return fallback
+	}
+
+	parsed, err := strconv.ParseBool(raw)
+	if err != nil {
+		source.fail(fmt.Errorf("%s must be true or false", name))
 
 		return fallback
 	}

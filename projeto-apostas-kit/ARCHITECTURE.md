@@ -6,10 +6,10 @@ atualizado a cada etapa. Cada seção informa o **estado**:
 - **Implementado**: existe no código e tem testes que passam.
 - **Decidido**: a decisão está tomada, mas o código ainda não existe (etapa indicada).
 
-Estado atual do projeto: **Etapas 0 a 6 concluídas** (esqueleto, Model, Repository com
-migrations, Service, View, Controller HTTP, autenticação com o Keycloak e mensageria SQS com
-workers). O Fx e o `main.go`, a observabilidade completa, os testes com três processos e o
-README ainda **não foram feitos**; ver "Limitações e trabalho não concluído".
+Estado atual do projeto: **Etapas 0 a 7 concluídas** (esqueleto, Model, Repository com
+migrations, Service, View, Controller HTTP, autenticação com o Keycloak, mensageria SQS com
+workers, e a composição com Fx, configuração, logs e métricas). Os testes com três processos
+e o README ainda **não foram feitos**; ver "Limitações e trabalho não concluído".
 
 ## 1. Mapeamento MVC + Service
 
@@ -20,7 +20,7 @@ README ainda **não foram feitos**; ver "Limitações e trabalho não concluído
 | Service | `internal/service` | Implementado (Etapa 3) |
 | Controller | `internal/controller/{http,sqs,worker,wire}` | Implementado (Etapas 4 e 6) |
 | View | `internal/view/{response,presenter,problem}` | Implementado (Etapa 4) |
-| Platform | `internal/platform/{clock,idgen,...}` | Parcial: `clock` e `idgen` implementados |
+| Platform | `internal/platform/{clock,idgen,auth,sqsclient,config,logging,metrics,fxmodules}` | Implementado (Etapas 5 a 7) |
 
 Regra de dependência: o Model importa **apenas a stdlib e a si mesmo**. Verificado com
 `go list -deps ./internal/model/...` (nenhuma dependência externa). O Service depende só
@@ -407,22 +407,107 @@ curl -s http://localhost:8081/providers/provider-a/wagering/transactions/tx-1 \
   validações de domínio no consumidor (seção 12). O `providerId` das mensagens vem do corpo, não
   de um token: quem pode publicar na fila é uma decisão do broker.
 
-## 11. Composição com Uber Fx e shutdown (Decidido; Etapa 7)
+## 11. Composição com Uber Fx, configuração e observabilidade (Implementado)
 
-Um `fx.Module` por camada (o Model não participa), `fx.Provide` com construtores e
-`fx.Invoke` só para registrar rotas e workers. `fx.Lifecycle`: `OnStart` não bloqueia, as
-goroutines usam `context` cancelável e `OnStop` espera o término do worker com prazo.
-Ordem de shutdown: parar as entradas (HTTP e SQS), esperar o trabalho em andamento e fechar
-o pool do banco por último. A composição será verificada com `fxtest`. `cmd/api/main.go`
-hoje é um placeholder vazio.
+### Composição
 
-**Peças prontas para o Fx.** O consumidor SQS e cada worker têm `Start()` (não bloqueia, devolve
-na hora) e `Stop(ctx)` (espera o trabalho em andamento até o prazo; vencido o prazo, cancela o
-contexto de trabalho, devolve `ErrShutdownTimeout` e, no consumidor, devolve as mensagens à
-fila). O worker expõe `Done()`, fechado quando o laço termina de fato, e o `Stop` é seguro
-antes do `Start` e repetido. O `OnStop` do Fx deve chamar, nesta ordem: o consumidor (para de
-receber e conclui o que está em andamento), os workers, o servidor HTTP e, por último, o pool
-do banco.
+`cmd/api/main.go` contém só `fx.New(fxmodules.Application()).Run()`. `Application()` lê o
+ambiente; uma configuração inválida vira um erro do Fx, que o imprime e encerra o processo com
+status 1 **antes de subir qualquer coisa**. Os testes usam `ApplicationWith(config, logOutput)`
+com uma configuração própria.
+
+Um `fx.Module` por camada, em `internal/platform/fxmodules` (o único lugar que conhece as
+implementações concretas, ligando-as às portas do Model): `platform` (relógio, IDs, pool do
+banco, cliente SQS, autenticador, métricas), `repository` (repositórios), `service` (casos de
+uso) e `controller` (roteador, servidor HTTP, consumidor, workers e o `Runtime`). O grafo é
+validado por `fx.ValidateApp` num teste unitário, e o serviço inteiro sobe e para num teste de
+integração com `fxtest`. Os eventos do próprio Fx saem pelo mesmo logger JSON.
+
+### Início e parada (o `Runtime`)
+
+A ordem é parte do contrato e fica num único hook do Fx, não na ordem em que os hooks são
+registrados:
+
+- **Início (não bloqueia):** workers, consumidor SQS e, por último, o servidor HTTP, que só
+  aceita tráfego com tudo no ar. O `Listen` acontece no início, então um erro de porta aparece
+  ali. Se uma etapa falha, o que já subiu é parado no próprio hook (o Fx só executa o `OnStop`
+  de hooks cujo `OnStart` deu certo).
+- **Parada:** servidor HTTP e consumidor (as entradas) em paralelo, esperando o que está em
+  andamento; depois os workers; por último o pool do banco, num hook anterior do Fx (o Fx
+  executa os `OnStop` na ordem inversa da construção, e tudo que usa o pool nasce depois dele).
+  O prazo é `APP_SHUTDOWN_TIMEOUT` (padrão 30 s); vencido, o servidor fecha as conexões que
+  restam, e o consumidor e os workers abandonam o trabalho (a transação SQL faz rollback e as
+  mensagens voltam à fila). O `StopTimeout` do Fx é esse prazo mais 5 s, para o fechamento do
+  pool caber.
+- Se o servidor HTTP cair por outro motivo, o serviço inteiro é parado (`fx.Shutdowner`): sem a
+  borda HTTP ele não pode ficar de pé.
+- **SIGTERM:** o `Run()` do Fx o trata; o binário real sai com status 0 (um teste compila
+  `cmd/api`, o executa e lhe envia o sinal).
+
+### Configuração (variáveis de ambiente)
+
+Lidas e validadas na partida; **todos** os erros saem juntos, citando só o nome da variável,
+nunca o valor. A senha do banco é um tipo `Secret`, que se imprime como `[redacted]` em `%v`,
+`%#v`, JSON e `slog`; a chave da AWS vem de um campo de texto do cliente SQS, então
+`Config.String()` e `LogValue()` entregam só um resumo sem segredos.
+
+| Variável | Obrigatória | Padrão | Uso |
+|---|---|---|---|
+| `APP_HTTP_ADDR` | não | `:8081` | endereço do servidor |
+| `APP_SHUTDOWN_TIMEOUT` | não | `30s` | prazo do desligamento |
+| `APP_LOG_LEVEL` | não | `info` | `debug`, `info`, `warn`, `error` |
+| `APP_MIGRATE_ON_START` | não | `false` | aplica as migrations na partida |
+| `APP_MIGRATIONS_DIR` | não | `migrations` | diretório das migrations |
+| `DATABASE_URL` | sim | | `postgres://...` |
+| `AWS_REGION` | sim | | região do SQS |
+| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | não | cadeia padrão da AWS | credenciais estáticas (LocalStack) |
+| `SQS_ENDPOINT` | não | | só para LocalStack |
+| `SQS_QUEUE_URL`, `SQS_DLQ_URL`, `SQS_EVENTS_QUEUE_URL` | sim | | as três filas |
+| `OIDC_ISSUER_URL`, `OIDC_JWKS_URL`, `OIDC_AUDIENCE` | sim | | validação dos tokens |
+| `OIDC_INTERNAL_SCOPE` | não | `wallet:internal` | escopo do serviço interno |
+
+Timeouts do `http.Server` (fixos): cabeçalho 5 s, leitura 15 s, escrita 30 s, ocioso 60 s.
+
+### Migrations na partida
+
+`postgres.Migrate` aplica as migrations pendentes com `golang-migrate`. O driver toma um **lock
+consultivo** do Postgres, então várias instâncias subindo juntas aplicam cada migration uma só
+vez e nenhuma falha (há teste com quatro em paralelo). Sem nada a aplicar, não faz nada; um
+banco "dirty" recusa novas migrations até alguém corrigi-lo. Fica **desligado por padrão**: o
+Docker Compose e o `.env.example` o ligam, mas em produção aplicar o schema é uma escolha de
+quem opera. Corre dentro da montagem do grafo, antes de qualquer hook de início, então nada
+aceita tráfego antes do schema existir. As migrations já criadas nunca são editadas.
+
+### Logs
+
+`log/slog` em JSON, uma linha por registro, em stdout. Nunca levam corpo de requisição, valores
+monetários, tokens, chave de idempotência nem a senha do banco; os campos de negócio são
+identificadores de correlação (`correlationId`, `messageId`, `groupId`).
+
+### Métricas (`GET /metrics`)
+
+No **mesmo servidor** das rotas de negócio, **sem autenticação** (o formato de texto do
+Prometheus não carrega dado de negócio). Registro próprio, não o global, com as métricas de Go
+e do processo:
+
+| Métrica | Rótulos | O que mede |
+|---|---|---|
+| `http_requests_total` | `method`, `route`, `status` | requisições concluídas |
+| `http_request_duration_seconds` | `method`, `route` | latência |
+| `sqs_consumer_messages_total` | `outcome` | desfecho de cada mensagem |
+| `sqs_consumer_dead_letters_total` | `reason` | envios à DLQ, por motivo |
+| `worker_iterations_total` | `worker`, `outcome` (`ok`, `error`, `panic`) | iterações dos workers |
+| `worker_iteration_duration_seconds` | `worker` | duração das iterações |
+| `outbox_pending_events` | | eventos ainda não publicados |
+| `outbox_oldest_pending_age_seconds` | | idade do evento mais antigo |
+| `sqs_dead_letter_queue_messages` | | mensagens na DLQ (aproximado) |
+
+Os três últimos são lidos **a cada coleta**, com prazo de 2 s (uma consulta ao banco e uma ao
+broker); se a leitura falha, só a série daquela métrica some e o resto continua saindo. Os
+rótulos têm valores de um conjunto pequeno e fixo: a rota é o **padrão** (`/wallets/{walletId}`,
+nunca o caminho com IDs), métodos HTTP desconhecidos viram `OTHER`, e nunca entram `walletId`,
+`providerId`, `messageId` nem chave de idempotência (há testes). Alertas úteis: idade da
+outbox crescendo (destino quebrado), DLQ acima de zero, `worker_iterations_total{outcome!="ok"}`.
 
 ## 12. Mensageria SQS (Implementado)
 
@@ -518,7 +603,7 @@ mensagem é uma única transação SQL: inbox, operação, ledger, saldo e event
   transação SQL faz rollback e não sobra efeito parcial) e as mensagens voltam à fila. Nada é
   recebido depois do `Stop`.
 - **Observabilidade:** um `Observer` recebe cada desfecho (`applied`, `duplicate`, `retried`,
-  `dead_lettered`, `released`, `delete_failed`) para as métricas da Etapa 7. Os logs levam
+  `dead_lettered`, `released`, `delete_failed`) para as métricas (seção 11). Os logs levam
   `messageId`, `groupId`, `receiveCount` e o desfecho, nunca o corpo.
 
 ### Eventos de saída: roteamento e consumo
@@ -598,6 +683,8 @@ broker inalcançável).
   uma vez por pacote de teste. Divergências do simulador observadas: aceita um corpo de
   mensagem vazio (a AWS recusa); devolve URLs de fila com a porta interna do container (os
   testes montam as URLs a partir do endpoint mapeado); não aplica políticas IAM.
+- Dependências adicionadas na Etapa 7: `go.uber.org/fx` e `github.com/prometheus/client_golang`
+  (e suas transitivas), com `go mod tidy` aplicado.
 - Testes de integração usam Postgres real via testcontainers e aplicam as migrations reais
   com `golang-migrate`, incluindo `up`, `down` e `up`. Ficam atrás da build tag
   `integration`.
@@ -606,17 +693,14 @@ broker inalcançável).
 
 Não concluído (previsto em `docs/PLANO.md`):
 
-- **Etapa 7:** módulos Fx, `main.go`, timeouts do `http.Server`, logs JSON configurados,
-  métricas Prometheus.
 - **Etapa 8:** testes com três processos, falhas entre commit e publicação, reinício.
 - **Etapa 9:** `README.md` (pré-requisitos, variáveis, filas, aplicação e reversão das
   migrations, exemplos de chamada).
 
-Hoje **não existe processo executável**: o serviço está pronto e testado de ponta a ponta
-(HTTP autenticado, consumidor SQS, workers e publicação de eventos), mas o `main.go` é um
-placeholder e nada compõe os componentes, então nada o sobe ainda. A composição, os módulos
-Fx e a ordem de início e de parada são da Etapa 7. Os itens eliminatórios que dependem das etapas acima, como os testes
-com três instâncias independentes, ainda não foram atendidos. Os testes de concorrência
+O serviço é executável (`cmd/api`) e está testado de ponta a ponta: HTTP autenticado,
+consumidor SQS, workers, publicação de eventos, migrations na partida e SIGTERM no binário
+real. Os itens eliminatórios que dependem das etapas acima, como os testes com três instâncias
+independentes, ainda não foram atendidos. Os testes de concorrência
 atuais rodam em um único processo; o teste exigido, com três processos, é da Etapa 8.
 
 Limitações conhecidas já registradas:
@@ -631,8 +715,8 @@ Limitações conhecidas já registradas:
 - Dentro de um lote, um grupo lento mantém ocupados os slots em voo dele; as mensagens do mesmo
   grupo já recebidas esperam, e as de outros grupos seguem.
 - O publisher não tem limite de tentativas nem fila morta para eventos: nenhum evento se
-  perde, mas um destino permanentemente quebrado faz a outbox crescer (a métrica de atraso,
-  da Etapa 7, deve alertar).
+  perde, mas um destino permanentemente quebrado faz a outbox crescer (a métrica
+  `outbox_oldest_pending_age_seconds` deve alertar).
 - Os lançamentos usam o relógio da aplicação, lido depois do lock da carteira. A cadeia de
   saldos (`balance_before` e `balance_after`) é sempre correta, mas a ordem por `created_at`
   pode divergir dela se os relógios de instâncias diferentes estiverem defasados.
@@ -645,10 +729,18 @@ Limitações conhecidas já registradas:
   carteira) vira `FAILED` com `INFRASTRUCTURE_FAILURE`, para auditoria, sem evento: não há
   evento definido para `FAILED`.
 - Moedas limitadas a BRL, USD e EUR.
-- O readiness de SQS verifica as filas de operações e de eventos (`GetQueueAttributes`); não
-  mede o atraso da outbox nem o tamanho da DLQ, que ficam para as métricas da Etapa 7.
-- Sem limite de requisições por provedor (rate limiting) e sem timeouts do servidor HTTP
-  definidos ainda.
+- O readiness de SQS verifica as filas de operações e de eventos (`GetQueueAttributes`); o
+  atraso da outbox e o tamanho da DLQ vão só para as métricas, não para o readiness.
+- Sem limite de requisições por provedor (rate limiting). `/metrics` é público no servidor de
+  negócio; quem precisar restringi-lo deve fazê-lo na borda (rede ou proxy).
+- **Reinício sob carga:** o `Stop` cancela o `ReceiveMessage` em andamento. Se o broker já
+  tinha entregue uma mensagem naquela chamada, ela fica invisível até o `VisibilityTimeout` de
+  60 s e só então volta (nada se perde nem duplica, mas essa mensagem atrasa até 1 minuto). Foi
+  observado no teste de reinício: em cinco execuções, 199 de 200 mensagens já estavam
+  concluídas no `Stop`, e a última chegou na hora ou 61 s depois. Esperar a recepção terminar
+  eliminaria o atraso ao custo de até `WaitSeconds` (10 s) a mais no desligamento.
+- As migrations aplicadas na partida não têm "down" automático: a reversão é manual, com a
+  ferramenta `migrate` (ver README, Etapa 9).
 - Os testes com o Keycloak real baixam a imagem (cerca de 500 MB) e sobem o IdP uma vez por
   execução (dezenas de segundos); ficam atrás da tag `integration`.
 
