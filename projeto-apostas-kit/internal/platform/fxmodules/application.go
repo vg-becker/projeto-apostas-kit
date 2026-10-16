@@ -36,7 +36,7 @@ func ApplicationWith(loaded config.Config, logOutput io.Writer) fx.Option {
 	return fx.Options(
 		fx.Supply(loaded, logger),
 		fx.StopTimeout(loaded.HTTP.ShutdownTimeout+stopMargin),
-		fx.WithLogger(func() fxevent.Logger { return &fxevent.SlogLogger{Logger: logger} }),
+		fx.WithLogger(func() fxevent.Logger { return newQuietFxLogger(logger) }),
 		PlatformModule,
 		RepositoryModule,
 		ServiceModule,
