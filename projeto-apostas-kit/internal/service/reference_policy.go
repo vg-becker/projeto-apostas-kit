@@ -60,13 +60,18 @@ func (policy ReferencePolicy) expired(createdAt time.Time, attempts int, now tim
 // backoff devolve o atraso antes da próxima tentativa: InitialBackoff dobrado a cada
 // tentativa já feita, limitado a MaxBackoff.
 func (policy ReferencePolicy) backoff(attempts int) time.Duration {
-	delay := policy.InitialBackoff
+	return doublingDelay(policy.InitialBackoff, policy.MaxBackoff, attempts)
+}
+
+// doublingDelay dobra o atraso inicial a cada tentativa, sem passar do máximo.
+func doublingDelay(initial time.Duration, maximum time.Duration, attempts int) time.Duration {
+	delay := initial
 	for range attempts {
 		delay *= 2
-		if delay >= policy.MaxBackoff {
-			return policy.MaxBackoff
+		if delay >= maximum {
+			return maximum
 		}
 	}
 
-	return min(delay, policy.MaxBackoff)
+	return min(delay, maximum)
 }

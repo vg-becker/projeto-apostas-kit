@@ -6,8 +6,8 @@ atualizado a cada etapa. Cada seção informa o **estado**:
 - **Implementado**: existe no código e tem testes que passam.
 - **Decidido**: a decisão está tomada, mas o código ainda não existe (etapa indicada).
 
-Estado atual do projeto: **Etapas 0, 1 e 2 concluídas** (esqueleto, Model, Repository e
-migrations). Service, HTTP, autenticação, SQS, Fx, observabilidade e a documentação de
+Estado atual do projeto: **Etapas 0 a 3 concluídas** (esqueleto, Model, Repository com
+migrations e Service). HTTP, autenticação, SQS, Fx, observabilidade e a documentação de
 uso (README) ainda **não foram feitos**; ver "Limitações e trabalho não concluído".
 
 ## 1. Mapeamento MVC + Service
@@ -16,15 +16,16 @@ uso (README) ainda **não foram feitos**; ver "Limitações e trabalho não conc
 |---|---|---|
 | Model | `internal/model/{money,identity,wallet,ledger,wager,event,port}` | Implementado |
 | Repository | `internal/repository/postgres` | Implementado |
-| Service | `internal/service` | Decidido (Etapa 3) |
+| Service | `internal/service` | Implementado (Etapa 3) |
 | Controller | `internal/controller/{http,sqs,worker}` | Decidido (Etapas 4 e 6) |
 | View | `internal/view/{response,presenter,problem}` | Decidido (Etapa 4) |
 | Platform | `internal/platform/{clock,idgen,...}` | Parcial: `clock` e `idgen` implementados |
 
 Regra de dependência: o Model importa **apenas a stdlib e a si mesmo**. Verificado com
-`go list -deps ./internal/model/...` (nenhuma dependência externa). O Service dependerá só
-das interfaces de `internal/model/port`, nunca do Repository concreto. HTTP e SQS
-compartilharão o mesmo caso de uso.
+`go list -deps ./internal/model/...` (nenhuma dependência externa). O Service depende só
+das interfaces de `internal/model/port`, nunca do Repository concreto (só os testes de
+integração o compõem com os repositórios reais). HTTP e SQS compartilharão o mesmo caso de
+uso, `OperationService.Process` (seção 15).
 
 **Pacote `identity`.** `wallet` devolve um `ledger.Entry` e `ledger` referencia o ID da
 carteira; isso formaria um ciclo. Os identificadores tipados (`WalletID`, `PlayerID`,
@@ -142,18 +143,34 @@ persistir; o mapeamento para HTTP e o contrato de erro serão definidos na Etapa
   `wager_transactions_one_reversal_per_reference` sobre `resolved_reference_id` para
   reversões `PROCESSED`. Sob concorrência, a segunda reversão falha com `ErrAlreadyExists`.
 
-**Referência indisponível (Decidido; worker na Etapa 6).**
+**Referência indisponível (Implementado no Service; o laço periódico do worker é da Etapa 6).**
+
+Vale para `REFUND`, `ROLLBACK` e para `WIN` com referência (esta deve ser uma BET processada
+da mesma rodada, provedor, jogador, carteira e moeda; o valor do WIN é livre; vários WINs
+podem referenciar a mesma BET).
 
 - Referência ausente: a operação é persistida como `PENDING_REFERENCE` e o evento
-  `WagerTransactionPendingReference` é emitido. Um worker reivindica as pendências com
-  `SKIP LOCKED`, com backoff exponencial, sobrevivendo a reinício (`reference_attempts`,
-  `next_attempt_at` e `lease_until` são persistidos). Ao esgotar o limite de tentativas ou o
-  TTL, a operação termina `REJECTED` com `REFERENCE_NOT_FOUND` e o evento de rejeição.
-  Os valores de limite e TTL serão definidos e documentados na Etapa 6.
+  `WagerTransactionPendingReference` é emitido (uma única vez). O `ReferenceResolver`
+  reivindica as pendências vencidas com `SKIP LOCKED` e lease, e tenta de novo com backoff
+  exponencial. O estado sobrevive a reinício (`reference_attempts`, `next_attempt_at`,
+  `lease_until` são persistidos) e pode ser assumido por qualquer instância.
+- **Política padrão** (`ReferencePolicy`, configurável): 10 tentativas, TTL de 10 minutos,
+  atraso de 2 s dobrando a cada tentativa até 1 min, lease de reivindicação de 1 min.
+  Esgotado o limite de tentativas **ou** o TTL, a operação termina `REJECTED` e o evento de
+  rejeição é emitido.
+- Qual código: `REFERENCE_NOT_FOUND` se a referência nunca apareceu; `REFERENCE_NOT_PROCESSED`
+  se ela existe mas nunca terminou.
 - Referência existente, mas ainda `PENDING` ou `PENDING_REFERENCE`: a validação devolve
   `ErrReferencePending` e a operação espera, no mesmo ciclo de tentativas.
 - Referência existente que terminou `REJECTED` ou `FAILED`: rejeição imediata com
   `REFERENCE_NOT_PROCESSED`.
+- Referência de outro provedor é invisível (a busca é por `(provedor, referência)`), então
+  não resolve; referência em outra carteira do mesmo provedor é `REFERENCE_MISMATCH`.
+- Só a carteira da própria operação é travada, nunca duas, então não há deadlock entre
+  carteiras. Uma reversão que debitaria mais que o saldo termina
+  `REVERSAL_INSUFFICIENT_FUNDS`, distinto de `INSUFFICIENT_FUNDS`.
+- O `correlationId` e o `causationId` da requisição original ficam gravados na transação
+  (migration `0006`), então os eventos emitidos depois pelo resolver os preservam.
 
 ## 6. Idempotência
 
@@ -163,15 +180,34 @@ persistir; o mapeamento para HTTP e o contrato de erro serão definidos na Etapa
 idempotência sobrevive a reinício porque está no banco, não na memória. O repositório
 distingue as duas violações pelo nome da constraint.
 
-**Hash do payload (Decidido; Etapa 3):** SHA-256 de JSON canônico (chaves ordenadas) dos
-campos de negócio, excluindo a chave de idempotência e metadados de transporte, com o valor
-monetário na forma normalizada (seção 2). O mesmo cálculo vale para HTTP e SQS. O banco
-exige que o hash seja 64 hex minúsculos.
+**Hash do payload (Implementado; `service.CanonicalHash`).** SHA-256, em hex minúsculo, de
+um JSON com chaves ordenadas (sem escape de HTML) contendo `providerId`,
+`externalTransactionId`, `playerId`, `walletId`, `roundId`, `gameId`, `kind`, `money`
+(`amount` normalizado e `currency`) e, quando houver, `referenceExternalTransactionId`.
+Ficam de fora a chave de idempotência e os metadados de transporte (`messageId`,
+`occurredAt`, correlação e causação). O mesmo cálculo serve a HTTP e SQS. O teste usa
+vetores calculados por outro programa (Python), porque mudar o algoritmo invalidaria hashes
+já persistidos. O banco exige 64 hex minúsculos.
 
-**Replay (Decidido; Etapa 3):** o saldo observado no processamento original é persistido em
-`result_balance_minor_units` justamente para o replay devolvê-lo mesmo depois de outras
-movimentações. Chave igual com conteúdo igual retorna o resultado persistido com
-`idempotentReplay: true`; chave reutilizada com conteúdo diferente retorna conflito.
+**Replay (Implementado).** O saldo observado no processamento original é persistido em
+`result_balance_minor_units`, então o replay o devolve mesmo depois de outras movimentações,
+com `idempotentReplay: true`. Uma rejeição também é um resultado persistido e é reproduzida.
+Chave igual com conteúdo diferente, ou o mesmo ID externo sob outra chave, retorna
+`ErrIdempotencyConflict`.
+
+**Ordem das verificações e a corrida corrigida.** O `Process` consulta primeiro só a chave,
+sem lock (replays não disputam a carteira). Depois trava a carteira e repete a consulta,
+agora também por ID externo. A consulta por ID externo precisa rodar **sob o lock**: sem ele,
+uma requisição que lia "chave inexistente" podia, entre as duas leituras, ver a operação
+recém-confirmada por outra e acusar conflito indevido. O erro apareceu de forma intermitente
+no teste de 50 envios idênticos e foi corrigido; há um teste de regressão com 12 rodadas
+simultâneas. Duas operações iguais sobre carteiras diferentes não ocorrem, pois a carteira
+faz parte do hash; um insert concorrente que viole a unicidade vira `ErrIdempotencyConflict`.
+
+**Erros de entrada não são persistidos** (validação, carteira inexistente, jogador ou moeda
+divergentes): persisti-los travaria a correção, pois o hash mudaria e a mesma chave daria
+conflito. O código `CURRENCY_MISMATCH` fica reservado e não é produzido. Rejeições de
+negócio, ao contrário, são resultados persistidos e terminais.
 
 ## 7. Ledger e integridade no banco (Implementado)
 
@@ -187,8 +223,8 @@ O schema impõe as invariantes independentemente do código e de locks locais:
   falha e saldo de resultado; política de valor por tipo; política de referência por tipo;
   índice único parcial que impede **crédito inicial duplicado** (uma `OPENING` por carteira);
   trigger que impede alterar ou apagar uma transação terminal.
-- Migrations versionadas em `migrations/` (`0001` a `0005`, `.up.sql` e `.down.sql`).
-  Migrations já criadas nunca são editadas; mudanças entram em uma nova migration.
+- Migrations versionadas em `migrations/` (`0001` a `0006`, `.up.sql` e `.down.sql`).
+  Migrations já criadas nunca são editadas; mudanças entram em uma nova migration. A `0006` acrescentou `correlation_id` e `causation_id` à `wager_transactions`.
 
 **Reconciliação (Repositório implementado; endpoint na Etapa 4).** `CalculateBalance` lê o
 saldo armazenado e o reconstruído pelo ledger **na mesma instrução SQL**, garantindo um único
@@ -215,7 +251,7 @@ limitação.
   (`base64url` de um JSON com instante, ID e carteira), limite padrão 50 e máximo 200.
   O cursor é validado em formato e carteira, mas **não é assinado**.
 
-## 9. Inbox e outbox (Repositórios implementados; consumidor e publisher nas Etapas 3 e 6)
+## 9. Inbox e outbox (Repositórios e publisher implementados; consumidor SQS e laço na Etapa 6)
 
 **Inbox.** `Begin` insere com `ON CONFLICT DO NOTHING`; `NEW` na primeira vez, `DUPLICATE` se
 já concluída com o mesmo hash, `HASH_CONFLICT` se o `messageId` voltou com outro conteúdo.
@@ -247,6 +283,18 @@ snapshot é imutável também no banco (trigger).
 `WalletBalanceChanged` inclui `walletId`, `transactionId`, `direction`, `money`,
 `balanceBefore`, `balanceAfter` e `walletVersion`. Eventos da abertura interna omitem os
 metadados externos.
+
+**Publisher (Implementado; `service.OutboxPublisher`).** `PublishPending` reivindica um lote
+(`SKIP LOCKED` com lease), publica em ordem de ocorrência por uma porta
+`port.EventPublisher` e confirma com `MarkPublished`. Se o destino recusa, agenda a nova
+tentativa com atraso dobrando de 2 s até 1 min (`PublishPolicy`: lotes de 50, lease de
+30 s). **Um evento nunca é descartado:** não há limite de tentativas, só repetição. Se o
+processo morre entre publicar e confirmar, o lease vence e outra instância republica o
+**mesmo `eventId`**; o destino deduplica por ele (na Etapa 6, `MessageDeduplicationId` =
+`eventId` e `MessageGroupId` = `aggregateId`). O cancelamento do contexto interrompe o lote;
+o que já foi entregue é confirmado com um contexto próprio e o restante volta depois do lease.
+O destino real (SQS) é da Etapa 6; os testes usam um destino registrador, com banco e outbox
+reais.
 
 **Limitações:** o `jsonb` normaliza ordem de chaves e espaços, então o payload publicado é a
 renderização do banco (equivalente ao original e idêntica em toda republicação). Com vários
@@ -300,20 +348,21 @@ tratamento de mensagem inválida serão definidos e documentados na Etapa 6.
 
 Não concluído (previsto em `docs/PLANO.md`):
 
-- **Etapa 3:** Service (`OperationService`, hash canônico, reconciliação, resolver de
-  referências, publisher da outbox).
 - **Etapa 4:** View, Controller HTTP, contratos de erro, health checks, endpoint de
   reconciliação.
 - **Etapa 5:** middleware JWT e testes de autenticação e isolamento entre provedores.
-- **Etapa 6:** consumidor SQS, workers e provisionamento via aplicação.
+- **Etapa 6:** consumidor SQS, laços dos workers (resolver, resumer, publisher) e destino
+  real dos eventos.
 - **Etapa 7:** módulos Fx, `main.go`, logs JSON, métricas Prometheus.
 - **Etapa 8:** testes com três processos, falhas entre commit e publicação, reinício.
 - **Etapa 9:** `README.md` (pré-requisitos, variáveis, filas, aplicação e reversão das
   migrations, exemplos de chamada).
 
-Hoje **não existe endpoint de negócio, autenticação efetiva nem consumidor funcionando**;
-vários itens eliminatórios do enunciado só serão atendidos quando as etapas acima forem
-concluídas.
+Hoje **não existe endpoint de negócio, autenticação efetiva nem consumidor funcionando**:
+o Service está pronto e testado, mas nada o expõe. Vários itens eliminatórios do enunciado
+(autenticação efetiva, acesso não autorizado pela borda, testes com três instâncias) só serão
+atendidos quando as etapas acima forem concluídas. Os testes de concorrência atuais rodam em
+um único processo; o teste exigido, com três processos independentes, é da Etapa 8.
 
 Limitações conhecidas já registradas:
 
@@ -321,7 +370,55 @@ Limitações conhecidas já registradas:
 - `ErrVersionConflict` cobre também carteira inexistente (seção 3).
 - Cursor de paginação não assinado (seção 8).
 - Ordem entre eventos do mesmo agregado não garantida com vários publishers (seção 9).
+- O publisher não tem limite de tentativas nem fila morta para eventos: nenhum evento se
+  perde, mas um destino permanentemente quebrado faz a outbox crescer (a métrica de atraso,
+  da Etapa 7, deve alertar).
+- Os lançamentos usam o relógio da aplicação, lido depois do lock da carteira. A cadeia de
+  saldos (`balance_before` e `balance_after`) é sempre correta, mas a ordem por `created_at`
+  pode divergir dela se os relógios de instâncias diferentes estiverem defasados.
+- Um WIN que estoure o `int64` do saldo (acima de 92 quatrilhões) devolve o erro de `money`,
+  sem código de falha.
 - O claim de `PENDING` não espera idade mínima: se a instância original ainda processa, a
   duplicidade é inofensiva, pois o Service relê o estado sob o lock da carteira e o trigger
   impede nova transição de registro terminal.
+- Uma `PENDING` confirmada que nunca possa ser aplicada (jogador ou moeda divergentes da
+  carteira) vira `FAILED` com `INFRASTRUCTURE_FAILURE`, para auditoria, sem evento: não há
+  evento definido para `FAILED`.
 - Moedas limitadas a BRL, USD e EUR.
+
+## 15. Casos de uso do Service (Implementado)
+
+Todos usam só portas do Model e leem o relógio e os IDs por `port.Clock` e `port.IDGenerator`.
+
+| Caso de uso | Onde | O que garante |
+|---|---|---|
+| Abertura de carteira | `WalletService.OpenWallet` | Carteira, `OPENING`, lançamento e dois eventos no mesmo commit; saldo zero cria só a carteira; jogador e moeda repetidos dão `ErrWalletExists`, inclusive em disputa (10 aberturas simultâneas criam uma) |
+| Processar operação | `OperationService.Process` | Idempotência, lock só da carteira, BET, WIN, LOSS, REFUND, ROLLBACK, rejeição persistida, espera por referência, eventos na outbox, tudo atômico |
+| Reconciliação | `WalletService.ReconcileWallet` | Saldo armazenado e reconstruído lidos na mesma instrução SQL; diferença = armazenado menos reconstruído; não altera nada |
+| Resolver referências | `ReferenceResolver.ResolveDue` | Conclui `PENDING_REFERENCE` vencidas; várias instâncias não resolvem a mesma duas vezes |
+| Retomar `PENDING` | `PendingResumer.ResumeAbandoned` | Uma transação aceita e nunca executada é assumida por outra instância quando o lease vence |
+| Publicar eventos | `OutboxPublisher.PublishPending` | Ver seção 9 |
+| Consultas | `QueryService` | Isolamento por provedor |
+
+**Estrutura.** `OperationService`, `ReferenceResolver` e `PendingResumer` compartilham um
+motor interno (`operationEngine`) cujo núcleo é `settle`: aplica a regra do tipo com a
+carteira já bloqueada, seja a operação nova ou já persistida. Antes de abrir a transação
+SQL, a entrada é validada e a `wager.Transaction` é montada em memória, então entrada
+inválida não deixa rastro. A rejeição de negócio volta como resultado (`Status` `REJECTED`
+com `FailureCode`) e não como erro; falhas transitórias voltam como erro reconhecível por
+`service.IsTransient`, e repetir com a mesma chave é seguro.
+
+**Consultas e isolamento (`QueryService`, `AccessScope`).** O escopo vem do token já validado
+pelo Controller: um provedor ou o serviço interno; o escopo vazio é negado. Um provedor lendo
+por ID a transação de outro provedor, ou a abertura interna, recebe
+`ErrTransactionNotFound`, de modo que a existência não vaza. Um provedor que peça o caminho
+`/providers/{outro}/...` recebe `ErrAccessDenied` (403). Replays também são isolados: a
+chave é por provedor, então outro provedor reenviando a mesma chave cria a própria operação e
+nunca recebe o resultado alheio. A listagem do ledger devolve páginas por cursor opaco; a
+restrição dela ao serviço interno é do Controller.
+
+**Retomada de `PENDING`.** Hoje o `Process` conclui tudo em um único commit, então uma
+transação `PENDING` confirmada só existe com aceite assíncrono. O enunciado exige retomada
+durável nesse caso, e o `PendingResumer` a garante: reivindica as `PENDING` sem lease ativo,
+trava a carteira, recarrega e conclui com a mesma regra. Se outra instância já a levou
+adiante, não faz nada; se ela nunca puder ser aplicada, vira `FAILED` (ver limitações).

@@ -39,6 +39,14 @@ type harness struct {
 	clock           *steppingClock
 	policy          service.ReferencePolicy
 	resolver        func() *service.ReferenceResolver
+	resumer         func() *service.PendingResumer
+	queries         *service.QueryService
+	transactions    *postgres.TransactionRepository
+	newPublisher    func(
+		destination port.EventPublisher,
+		outbox port.OutboxRepository,
+		policy service.PublishPolicy,
+	) *service.OutboxPublisher
 }
 
 // steppingClock é um relógio de teste que só anda quando o teste manda.
@@ -117,6 +125,27 @@ func newHarnessWithPolicy(t *testing.T, policy service.ReferencePolicy) *harness
 		policy:          policy,
 		resolver: func() *service.ReferenceResolver {
 			return service.NewReferenceResolver(dependencies(outbox))
+		},
+		resumer: func() *service.PendingResumer {
+			return service.NewPendingResumer(dependencies(outbox))
+		},
+		queries: service.NewQueryService(service.QueryServiceDependencies{
+			Wallets:    postgres.NewWalletRepository(connection),
+			Operations: postgres.NewTransactionRepository(connection),
+			Ledger:     postgres.NewLedgerRepository(connection),
+		}),
+		transactions: postgres.NewTransactionRepository(connection),
+		newPublisher: func(
+			destination port.EventPublisher,
+			selected port.OutboxRepository,
+			publishPolicy service.PublishPolicy,
+		) *service.OutboxPublisher {
+			return service.NewOutboxPublisher(service.OutboxPublisherDependencies{
+				Outbox:    selected,
+				Publisher: destination,
+				Clock:     stepping,
+				Policy:    publishPolicy,
+			})
 		},
 	}
 }
