@@ -15,6 +15,8 @@ var (
 	ErrWalletPlayerMismatch = errors.New("service: wallet belongs to another player")
 	ErrCurrencyMismatch     = errors.New("service: operation currency differs from wallet currency")
 	ErrAccessDenied         = errors.New("service: access denied")
+	ErrInboundHashConflict  = errors.New("service: message id reused with different content")
+	ErrInvalidMessage       = errors.New("service: invalid inbound message")
 )
 
 // IsTransient informa se o erro é uma indisponibilidade temporária da infraestrutura:

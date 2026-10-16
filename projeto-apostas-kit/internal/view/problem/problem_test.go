@@ -178,3 +178,23 @@ func TestUnauthenticatedNeverExplainsWhyTheCredentialWasRefused(t *testing.T) {
 		}
 	}
 }
+
+// TestEveryClientErrorOfTheHTTPContractIsPermanentForMessaging garante que HTTP e SQS não
+// divergem sobre o que é entrada inválida: tudo que vira 400, 404 ou 409 numa resposta é
+// descartado, e não repetido, no consumidor.
+func TestEveryClientErrorOfTheHTTPContractIsPermanentForMessaging(t *testing.T) {
+	for _, candidate := range rules {
+		isClientError := candidate.status == http.StatusBadRequest ||
+			candidate.status == http.StatusNotFound || candidate.status == http.StatusConflict
+		if !isClientError {
+			continue
+		}
+
+		for _, sentinel := range candidate.sentinels {
+			if !service.IsPermanent(sentinel) {
+				t.Fatalf("%v maps to %d (%s) over HTTP but is not permanent for messaging",
+					sentinel, candidate.status, candidate.code)
+			}
+		}
+	}
+}

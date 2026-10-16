@@ -41,6 +41,8 @@ type harness struct {
 	resolver        func() *service.ReferenceResolver
 	resumer         func() *service.PendingResumer
 	queries         *service.QueryService
+	messages        func(outbox port.OutboxRepository) *service.MessageHandler
+	handler         *service.MessageHandler
 	transactions    *postgres.TransactionRepository
 	newPublisher    func(
 		destination port.EventPublisher,
@@ -113,7 +115,19 @@ func newHarnessWithPolicy(t *testing.T, policy service.ReferencePolicy) *harness
 		return service.NewOperationService(dependencies(selected))
 	}
 
+	messages := func(selected port.OutboxRepository) *service.MessageHandler {
+		return service.NewMessageHandler(service.MessageHandlerDependencies{
+			Transactions: manager,
+			Inbox:        postgres.NewInboxRepository(connection),
+			Operations:   buildOperations(selected),
+			Clock:        stepping,
+			ConsumerName: "wager-transactions",
+		})
+	}
+
 	return &harness{
+		messages:        messages,
+		handler:         messages(outbox),
 		pool:            pool,
 		wallets:         build(outbox),
 		ids:             idgen.Generator{},
