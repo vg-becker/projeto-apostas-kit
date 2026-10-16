@@ -47,6 +47,24 @@ type Config struct {
 	MaxErrorInterval time.Duration
 	// Jitter é a fração aleatória acrescentada a cada espera (0 desliga).
 	Jitter float64
+	// Observer é opcional e recebe o resultado de cada iteração.
+	Observer Observer
+}
+
+// Iteration é o resultado de uma iteração, para métricas.
+type Iteration struct {
+	Worker   string
+	Duration time.Duration
+	// Failed indica que a tarefa devolveu erro ou entrou em panic.
+	Failed bool
+	// Panicked indica que a tarefa entrou em panic (e Failed também vale).
+	Panicked bool
+}
+
+// Observer recebe cada iteração. A implementação deve ser rápida e segura para uso
+// concorrente.
+type Observer interface {
+	Observe(iteration Iteration)
 }
 
 // Worker executa uma Task em laço, com início e término observáveis.
@@ -145,7 +163,10 @@ func (worker *Worker) run(runContext context.Context, workContext context.Contex
 	failures := 0
 
 	for runContext.Err() == nil {
+		started := time.Now()
 		more, err := worker.iterate(workContext)
+
+		worker.observe(started, err)
 
 		wait := worker.nextWait(runContext, more, err, &failures)
 		if wait <= 0 {
@@ -158,6 +179,19 @@ func (worker *Worker) run(runContext context.Context, workContext context.Contex
 		case <-time.After(wait):
 		}
 	}
+}
+
+func (worker *Worker) observe(started time.Time, err error) {
+	if worker.config.Observer == nil {
+		return
+	}
+
+	worker.config.Observer.Observe(Iteration{
+		Worker:   worker.config.Name,
+		Duration: time.Since(started),
+		Failed:   err != nil,
+		Panicked: errors.Is(err, errTaskPanicked),
+	})
 }
 
 // iterate roda a tarefa. Um panic vira erro: o bug de uma iteração não derruba o processo.

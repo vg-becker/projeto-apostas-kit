@@ -284,3 +284,38 @@ func TestErrorsAreClassifiedAsPermanentOrTransient(t *testing.T) {
 		t.Fatalf("an unreachable broker must be transient: %v", networkErr)
 	}
 }
+
+func TestApproximateMessagesReportsTheQueueDepth(t *testing.T) {
+	client, queues := newClient(t)
+
+	for index, group := range []string{"g1", "g2", "g3"} {
+		send(t, client, queues.DeadLetter, group, "dedup-"+group, "body-"+string(rune('a'+index)))
+	}
+
+	deadline := time.Now().Add(15 * time.Second)
+
+	for {
+		depth, err := client.ApproximateMessages(context.Background(), queues.DeadLetter)
+		if err != nil {
+			t.Fatalf("ApproximateMessages error = %v", err)
+		}
+
+		if depth == 3 {
+			return
+		}
+
+		if time.Now().After(deadline) {
+			t.Fatalf("depth = %d, want 3", depth)
+		}
+
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+func TestApproximateMessagesFailsForAMissingQueue(t *testing.T) {
+	client, queues := newClient(t)
+
+	if _, err := client.ApproximateMessages(context.Background(), queues.Requests+"-missing"); err == nil {
+		t.Fatal("want an error for a queue that does not exist")
+	}
+}

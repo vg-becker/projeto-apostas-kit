@@ -291,3 +291,31 @@ func TestClaimReturnsTheEventsInTheOrderTheyOccurred(t *testing.T) {
 		}
 	}
 }
+
+func TestBacklogCountsOnlyUnpublishedEventsAndTheAgeOfTheOldest(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	pending, oldest, err := f.outbox.Backlog(ctx)
+	if err != nil || pending != 0 || oldest != 0 {
+		t.Fatalf("empty outbox = %d, %v, %v", pending, oldest, err)
+	}
+
+	now := time.Now()
+	published := f.addEvent(t, now.Add(-time.Hour))
+	f.addEvent(t, now.Add(-10*time.Minute))
+	f.addEvent(t, now.Add(-time.Minute))
+
+	if err := f.outbox.MarkPublished(ctx, published.EventID(), now); err != nil {
+		t.Fatalf("MarkPublished error = %v", err)
+	}
+
+	pending, oldest, err = f.outbox.Backlog(ctx)
+	if err != nil || pending != 2 {
+		t.Fatalf("backlog = %d, %v", pending, err)
+	}
+
+	if oldest < 10*time.Minute || oldest > 11*time.Minute {
+		t.Fatalf("oldest = %v, want about 10 minutes (the published event must not count)", oldest)
+	}
+}

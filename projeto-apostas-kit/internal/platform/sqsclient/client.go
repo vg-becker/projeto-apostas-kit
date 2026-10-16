@@ -261,3 +261,22 @@ func attributesFrom(attributes map[string]types.MessageAttributeValue) map[strin
 
 	return converted
 }
+
+// ApproximateMessages devolve o número aproximado de mensagens visíveis na fila, para
+// métricas (a contagem do SQS é eventualmente consistente).
+func (client *Client) ApproximateMessages(
+	ctx context.Context,
+	queueURL string,
+) (int64, error) {
+	attributes, err := client.QueueAttributes(ctx, queueURL)
+	if err != nil {
+		return 0, err
+	}
+
+	count, err := strconv.ParseInt(attributes["ApproximateNumberOfMessages"], 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("sqsclient: read queue depth: %w", err)
+	}
+
+	return count, nil
+}

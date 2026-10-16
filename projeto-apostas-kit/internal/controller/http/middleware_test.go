@@ -2,11 +2,13 @@ package http
 
 import (
 	"bytes"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func newLogger() (*slog.Logger, *bytes.Buffer) {
@@ -177,5 +179,68 @@ func TestStatusWriterKeepsTheFirstStatusAndDefaultsTo200(t *testing.T) {
 
 	if implicit.status != http.StatusOK || explicit.status != http.StatusCreated {
 		t.Fatalf("implicit = %d, explicit = %d", implicit.status, explicit.status)
+	}
+}
+
+type observedRequest struct {
+	method string
+	route  string
+	status int
+}
+
+type recordingObserver struct {
+	requests []observedRequest
+}
+
+func (observer *recordingObserver) ObserveRequest(
+	method string,
+	route string,
+	status int,
+	_ time.Duration,
+) {
+	observer.requests = append(observer.requests, observedRequest{method, route, status})
+}
+
+func TestTheObserverSeesTheRoutePatternAndFinalStatus(t *testing.T) {
+	observer := &recordingObserver{}
+	router := NewRouter(Dependencies{
+		Authenticator: stubAuthenticator{err: errors.New("no token")},
+		Observer:      observer,
+	})
+
+	for _, path := range []string{"/wallets/0192f291-27dd-7d3f-8071-5f8685deef37", "/nowhere/42"} {
+		router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, path, nil))
+	}
+
+	want := []observedRequest{
+		{http.MethodGet, "/wallets/{walletId}", http.StatusUnauthorized},
+		{http.MethodGet, "/", http.StatusNotFound},
+	}
+
+	if len(observer.requests) != len(want) {
+		t.Fatalf("observed %+v", observer.requests)
+	}
+
+	for index := range want {
+		if observer.requests[index] != want[index] {
+			t.Fatalf("request %d = %+v, want %+v", index, observer.requests[index], want[index])
+		}
+	}
+}
+
+func TestMetricsAreServedOnlyWhenAHandlerIsGiven(t *testing.T) {
+	served := NewRouter(Dependencies{Metrics: http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = writer.Write([]byte("up 1"))
+	})})
+	absent := NewRouter(Dependencies{})
+
+	with := httptest.NewRecorder()
+	served.ServeHTTP(with, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+
+	without := httptest.NewRecorder()
+	absent.ServeHTTP(without, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+
+	if with.Code != http.StatusOK || with.Body.String() != "up 1" || without.Code != http.StatusNotFound {
+		t.Fatalf("with = %d %q, without = %d", with.Code, with.Body.String(), without.Code)
 	}
 }

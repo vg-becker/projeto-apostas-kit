@@ -27,6 +27,11 @@ type Dependencies struct {
 	ReadinessTimeout time.Duration
 	// Logger é opcional; sem ele, nada é registrado.
 	Logger *slog.Logger
+	// Observer é opcional e recebe cada requisição concluída, para métricas.
+	Observer RequestObserver
+	// Metrics é opcional; se informado, responde em GET /metrics, sem autenticação (o
+	// formato de texto do Prometheus não carrega dado de negócio).
+	Metrics http.Handler
 }
 
 type controller struct {
@@ -82,11 +87,18 @@ func NewRouter(dependencies Dependencies) http.Handler {
 	)
 	mux.Handle("/health/live", methods{http.MethodGet: handler.live})
 	mux.Handle("/health/ready", methods{http.MethodGet: handler.ready})
+	handler.mountMetrics(mux)
 	mux.HandleFunc("/", func(writer http.ResponseWriter, _ *http.Request) {
 		writeProblem(writer, problem.RouteNotFound())
 	})
 
-	return withMiddleware(mux, handler.logger)
+	return withMiddleware(mux, handler.logger, handler.Observer)
+}
+
+func (handler *controller) mountMetrics(mux *http.ServeMux) {
+	if handler.Metrics != nil {
+		mux.Handle("/metrics", methods{http.MethodGet: handler.Metrics.ServeHTTP})
+	}
 }
 
 // authenticate resolve a identidade; sem ela, responde 401 e devolve false.

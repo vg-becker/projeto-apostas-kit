@@ -318,3 +318,67 @@ func TestJitterOnlyLengthensTheWaitWithinTheFraction(t *testing.T) {
 		t.Fatalf("no jitter configured = %v", got)
 	}
 }
+
+type recordingObserver struct {
+	mutex      sync.Mutex
+	iterations []Iteration
+}
+
+func (observer *recordingObserver) Observe(iteration Iteration) {
+	observer.mutex.Lock()
+	defer observer.mutex.Unlock()
+
+	observer.iterations = append(observer.iterations, iteration)
+}
+
+func (observer *recordingObserver) snapshot() []Iteration {
+	observer.mutex.Lock()
+	defer observer.mutex.Unlock()
+
+	return append([]Iteration(nil), observer.iterations...)
+}
+
+func TestTheObserverSeesSuccessErrorAndPanic(t *testing.T) {
+	var calls atomic.Int32
+
+	observer := &recordingObserver{}
+	config := Config{Name: "observed", Interval: 5 * time.Millisecond, Observer: observer}
+
+	worker, _ := newWorker(t, config, func(context.Context) (bool, error) {
+		switch calls.Add(1) {
+		case 1:
+			return false, nil
+		case 2:
+			return false, errors.New("boom")
+		case 3:
+			panic("boom")
+		default:
+			return false, nil
+		}
+	})
+
+	if err := worker.Start(); err != nil {
+		t.Fatalf("Start error = %v", err)
+	}
+
+	time.Sleep(600 * time.Millisecond)
+	stop(t, worker)
+
+	seen := observer.snapshot()
+	if len(seen) < 4 {
+		t.Fatalf("iterations observed = %d", len(seen))
+	}
+
+	for index, want := range []Iteration{
+		{Worker: "observed"},
+		{Worker: "observed", Failed: true},
+		{Worker: "observed", Failed: true, Panicked: true},
+	} {
+		got := seen[index]
+		got.Duration = 0
+
+		if got != want {
+			t.Fatalf("iteration %d = %+v, want %+v", index, got, want)
+		}
+	}
+}

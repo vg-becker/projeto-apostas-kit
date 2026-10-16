@@ -63,6 +63,13 @@ const markOutboxFailed = `
 	   AND published_at IS NULL
 `
 
+const outboxBacklog = `
+	SELECT count(*),
+	       COALESCE(EXTRACT(EPOCH FROM (now() - min(occurred_at))), 0)::float8
+	  FROM outbox_events
+	 WHERE published_at IS NULL
+`
+
 var _ port.OutboxRepository = (*OutboxRepository)(nil)
 
 // OutboxRepository implementa port.OutboxRepository sobre outbox_events.
@@ -226,4 +233,19 @@ func inOrderOfOccurrence(records []port.OutboxRecord) []port.OutboxRecord {
 	})
 
 	return records
+}
+
+// Backlog informa quantos eventos ainda não foram publicados e há quanto tempo o mais
+// antigo espera, para métricas. É uma leitura do estado, sem lock nem efeito.
+func (repository *OutboxRepository) Backlog(
+	ctx context.Context,
+) (pending int64, oldest time.Duration, err error) {
+	var oldestSeconds float64
+
+	row := repository.connection.Querier(ctx).QueryRow(ctx, outboxBacklog)
+	if err := row.Scan(&pending, &oldestSeconds); err != nil {
+		return 0, 0, translateError(err)
+	}
+
+	return pending, time.Duration(oldestSeconds * float64(time.Second)), nil
 }

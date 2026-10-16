@@ -20,11 +20,42 @@ const (
 
 var errPanic = errors.New("http: handler panicked")
 
+// RequestObserver recebe cada requisição concluída: a rota é o padrão (sem IDs), então o
+// conjunto de valores é pequeno e fixo.
+type RequestObserver interface {
+	ObserveRequest(method string, route string, status int, duration time.Duration)
+}
+
 // withMiddleware envolve o roteador. Ordem, de fora para dentro: correlação (todos os
-// registros a usam), log de acesso (enxerga o status final) e recuperação de panic (o 500
-// que ela escreve já passa pelo log de acesso).
-func withMiddleware(next http.Handler, logger *slog.Logger) http.Handler {
-	return correlation(accessLog(recoverer(next, logger), logger))
+// registros a usam), log de acesso e métricas (enxergam o status final) e recuperação de
+// panic (o 500 que ela escreve já passa pelo log de acesso e pelas métricas).
+func withMiddleware(
+	next http.Handler,
+	logger *slog.Logger,
+	observer RequestObserver,
+) http.Handler {
+	return correlation(accessLog(measure(recoverer(next, logger), observer), logger))
+}
+
+// measure informa a duração e o status de cada requisição ao observer, se houver.
+func measure(next http.Handler, observer RequestObserver) http.Handler {
+	if observer == nil {
+		return next
+	}
+
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		started := time.Now()
+		wrapped := &statusWriter{ResponseWriter: writer, status: http.StatusOK}
+
+		next.ServeHTTP(wrapped, request)
+
+		observer.ObserveRequest(
+			request.Method,
+			routeOf(request),
+			wrapped.status,
+			time.Since(started),
+		)
+	})
 }
 
 // correlation garante um X-Correlation-Id válido na requisição e na resposta; o valor
