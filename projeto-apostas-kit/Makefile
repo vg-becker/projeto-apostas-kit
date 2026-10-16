@@ -1,6 +1,6 @@
 GO ?= go
 
-.PHONY: fmt vet lint test test-race build up
+.PHONY: fmt vet lint test test-race test-integration build up
 
 fmt:
 	gofmt -l .
@@ -16,6 +16,9 @@ test:
 
 test-race:
 	$(GO) test -race ./...
+
+test-integration:
+	$(GO) test -race -tags=integration ./...
 
 build:
 	$(GO) build ./...
