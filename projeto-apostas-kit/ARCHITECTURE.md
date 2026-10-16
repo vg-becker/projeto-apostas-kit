@@ -6,9 +6,10 @@ atualizado a cada etapa. Cada seção informa o **estado**:
 - **Implementado**: existe no código e tem testes que passam.
 - **Decidido**: a decisão está tomada, mas o código ainda não existe (etapa indicada).
 
-Estado atual do projeto: **Etapas 0 a 3 concluídas** (esqueleto, Model, Repository com
-migrations e Service). HTTP, autenticação, SQS, Fx, observabilidade e a documentação de
-uso (README) ainda **não foram feitos**; ver "Limitações e trabalho não concluído".
+Estado atual do projeto: **Etapas 0 a 4 concluídas** (esqueleto, Model, Repository com
+migrations, Service, View e Controller HTTP). **A autenticação ainda é uma interface com
+tokens de teste**, o consumidor SQS, o Fx, a observabilidade completa e o README ainda **não
+foram feitos**; ver "Limitações e trabalho não concluído".
 
 ## 1. Mapeamento MVC + Service
 
@@ -17,8 +18,8 @@ uso (README) ainda **não foram feitos**; ver "Limitações e trabalho não conc
 | Model | `internal/model/{money,identity,wallet,ledger,wager,event,port}` | Implementado |
 | Repository | `internal/repository/postgres` | Implementado |
 | Service | `internal/service` | Implementado (Etapa 3) |
-| Controller | `internal/controller/{http,sqs,worker}` | Decidido (Etapas 4 e 6) |
-| View | `internal/view/{response,presenter,problem}` | Decidido (Etapa 4) |
+| Controller | `internal/controller/http` | Implementado (Etapa 4); `sqs` e `worker` na Etapa 6 |
+| View | `internal/view/{response,presenter,problem}` | Implementado (Etapa 4) |
 | Platform | `internal/platform/{clock,idgen,...}` | Parcial: `clock` e `idgen` implementados |
 
 Regra de dependência: o Model importa **apenas a stdlib e a si mesmo**. Verificado com
@@ -315,7 +316,11 @@ at-least-once e o consumidor deve deduplicar por `eventId`.
 - O acesso à mensageria é controlado por credenciais e políticas do broker, preservando as
   validações de domínio no consumidor.
 
-O realm e o Compose existem; o middleware, a validação e os testes 401/403 **ainda não**.
+O realm e o Compose existem. No Controller, a identidade chega por uma interface
+(`http.Authenticator`, que devolve um `Principal` com `ProviderID` ou `Internal`), e as regras
+de quem pode o quê já estão implementadas e testadas (seção 16). **A implementação com JWT, o
+middleware e os testes com o Keycloak real ainda não existem (Etapa 5): hoje os endpoints
+de negócio não têm autenticação efetiva.**
 
 ## 11. Composição com Uber Fx e shutdown (Decidido; Etapa 7)
 
@@ -348,21 +353,22 @@ tratamento de mensagem inválida serão definidos e documentados na Etapa 6.
 
 Não concluído (previsto em `docs/PLANO.md`):
 
-- **Etapa 4:** View, Controller HTTP, contratos de erro, health checks, endpoint de
-  reconciliação.
-- **Etapa 5:** middleware JWT e testes de autenticação e isolamento entre provedores.
-- **Etapa 6:** consumidor SQS, laços dos workers (resolver, resumer, publisher) e destino
-  real dos eventos.
-- **Etapa 7:** módulos Fx, `main.go`, logs JSON, métricas Prometheus.
+- **Etapa 5:** implementação do `Authenticator` com JWT (Keycloak, JWKS), middleware e testes
+  de autenticação com o IdP real, incluindo credenciais ausentes, inválidas e expiradas.
+- **Etapa 6:** consumidor SQS, laços dos workers (resolver, resumer, publisher), destino real
+  dos eventos e a verificação de SQS do readiness.
+- **Etapa 7:** módulos Fx, `main.go`, timeouts do `http.Server`, logs JSON configurados,
+  métricas Prometheus.
 - **Etapa 8:** testes com três processos, falhas entre commit e publicação, reinício.
 - **Etapa 9:** `README.md` (pré-requisitos, variáveis, filas, aplicação e reversão das
   migrations, exemplos de chamada).
 
-Hoje **não existe endpoint de negócio, autenticação efetiva nem consumidor funcionando**:
-o Service está pronto e testado, mas nada o expõe. Vários itens eliminatórios do enunciado
-(autenticação efetiva, acesso não autorizado pela borda, testes com três instâncias) só serão
-atendidos quando as etapas acima forem concluídas. Os testes de concorrência atuais rodam em
-um único processo; o teste exigido, com três processos independentes, é da Etapa 8.
+Hoje **não existe autenticação efetiva, consumidor SQS nem processo executável**: o serviço
+está pronto e testado até a borda HTTP, mas o `main.go` é um placeholder e a identidade vem de
+uma interface preenchida por testes. Vários itens eliminatórios do enunciado (autenticação
+efetiva, testes com três instâncias) só serão atendidos nas etapas acima. Os testes de
+concorrência atuais rodam em um único processo; o teste exigido, com três processos
+independentes, é da Etapa 8.
 
 Limitações conhecidas já registradas:
 
@@ -385,6 +391,10 @@ Limitações conhecidas já registradas:
   carteira) vira `FAILED` com `INFRASTRUCTURE_FAILURE`, para auditoria, sem evento: não há
   evento definido para `FAILED`.
 - Moedas limitadas a BRL, USD e EUR.
+- O readiness só tem verificação real do Postgres; a do SQS é uma porta (`port.HealthCheck`)
+  sem implementação até a Etapa 6.
+- Sem limite de requisições por provedor (rate limiting) e sem timeouts do servidor HTTP
+  definidos ainda.
 
 ## 15. Casos de uso do Service (Implementado)
 
@@ -422,3 +432,106 @@ transação `PENDING` confirmada só existe com aceite assíncrono. O enunciado 
 durável nesse caso, e o `PendingResumer` a garante: reivindica as `PENDING` sem lease ativo,
 trava a carteira, recarrega e conclui com a mesma regra. Se outra instância já a levou
 adiante, não faz nada; se ela nunca puder ser aplicada, vira `FAILED` (ver limitações).
+
+## 16. Contrato HTTP e borda (Implementado)
+
+Pacotes: `internal/controller/http` (roteamento, autorização, validação de formato) e
+`internal/view/{response,presenter,problem}` (corpos e tradução de erros). O Controller só
+chama o Service; nenhuma regra financeira nem SQL fica nele.
+
+### Rotas e autorização
+
+| Rota | Quem pode | Sucesso |
+|---|---|---|
+| `POST /wallets` | só serviço interno | **201** + `Location`, corpo da carteira |
+| `GET /wallets/{walletId}` | só serviço interno | 200 |
+| `GET /wallets/{walletId}/ledger?cursor=&limit=` | só serviço interno | 200, página com `nextCursor` |
+| `POST /wallets/{walletId}/reconciliation` | só serviço interno | 200 |
+| `POST /wagering/transactions` | só provedor autenticado | 200, 202 ou 422 |
+| `GET /wagering/transactions/{transactionId}` | provedor (as próprias) ou interno | 200 |
+| `GET /providers/{providerId}/wagering/transactions/{externalTransactionId}` | provedor (só o próprio caminho) ou interno | 200 |
+| `GET /health/live`, `GET /health/ready` | público | 200 / 503 |
+
+Sem credencial ou com credencial inválida, **401** com `WWW-Authenticate: Bearer` e o mesmo
+detalhe fixo (não revela por que foi recusada). Identidade sem permissão: **403**. O
+`providerId` das operações vem **da identidade**; um `providerId` de corpo diferente é 403
+`PROVIDER_MISMATCH`, e um ausente é 400. Em nenhum desses casos há efeito financeiro.
+
+### Resposta de `POST /wagering/transactions`
+
+| Situação | Status | Corpo |
+|---|---|---|
+| `PROCESSED` (inclusive replay) | **200** | `{transactionId, status, balance, idempotentReplay}` |
+| `PENDING` ou `PENDING_REFERENCE` | **202** + `Location` | `{transactionId, status, idempotentReplay}`, sem `balance` |
+| `REJECTED` (rejeição de negócio persistida) | **422** | `{transactionId, status, failureCode, correctable, idempotentReplay}` |
+| `FAILED` (falha permanente de infraestrutura) | **500** | o resultado, com `INFRASTRUCTURE_FAILURE` |
+
+O 422 é exclusivo de resultado persistido. Tudo que o cliente pode corrigir e reenviar com a
+mesma chave é 400.
+
+### Erros (`application/problem+json`)
+
+Corpo: `{type, title, status, code, detail}`, com `type` = `urn:apostas:problem:{code}`. O
+`detail` de 4xx traz a mensagem do erro de domínio; em 5xx e 503 é fixo, e o texto do erro
+nunca vaza.
+
+| Status | `code` |
+|---|---|
+| 400 | `INVALID_REQUEST`, `INVALID_JSON`, `MISSING_IDEMPOTENCY_KEY`, `INVALID_AMOUNT`, `UNKNOWN_CURRENCY`, `INVALID_KIND`, `KIND_NOT_ALLOWED`, `WALLET_PLAYER_MISMATCH`, `CURRENCY_MISMATCH`, `INVALID_CURSOR` |
+| 401 | `UNAUTHENTICATED` |
+| 403 | `FORBIDDEN`, `PROVIDER_MISMATCH` |
+| 404 | `WALLET_NOT_FOUND`, `TRANSACTION_NOT_FOUND`, `ROUTE_NOT_FOUND` |
+| 405 | `METHOD_NOT_ALLOWED` (com `Allow`) |
+| 409 | `IDEMPOTENCY_CONFLICT`, `WALLET_ALREADY_EXISTS` |
+| 413 | `PAYLOAD_TOO_LARGE` |
+| 415 | `UNSUPPORTED_MEDIA_TYPE` |
+| 500 | `INTERNAL_ERROR` |
+| 503 | `SERVICE_UNAVAILABLE` (com `Retry-After`) |
+
+Uma indisponibilidade transitória (`port.ErrTransient` ou prazo expirado) tem precedência
+sobre qualquer outro significado do erro e vira 503.
+
+### Entrada
+
+- `Idempotency-Key` é obrigatório e usado **exatamente como recebido**; o servidor nunca o
+  substitui por outro calculado.
+- JSON estrito: tipo de mídia `application/json`, no máximo 64 KiB, sem campos desconhecidos
+  e sem dados depois do JSON. Valor monetário como **número** JSON é recusado (dinheiro é
+  sempre texto). `amount` passa por `money.Parse`.
+- `limit` do ledger deve estar entre 1 e 200 (senão 400, nunca ajuste silencioso).
+- `X-Correlation-Id` é aceito se for ASCII imprimível, sem espaços e com até 128 caracteres;
+  caso contrário é substituído por um valor gerado (32 hex). O valor final é devolvido no
+  cabeçalho da resposta e chega ao `correlationId` dos eventos da outbox.
+
+### Health checks
+
+- `/health/live`: 200 `{"status":"UP"}` enquanto o processo responde; nunca consulta
+  dependências.
+- `/health/ready`: consulta cada dependência em paralelo, com prazo próprio (2 s por padrão).
+  200 se todas estão `UP`; 503 se alguma está `DOWN`, e o corpo indica qual
+  (`{"status":"DOWN","checks":{"postgres":"UP","sqs":"DOWN"}}`). Só `UP` ou `DOWN` aparecem:
+  o texto do erro vai para o log. Uma dependência que trava, mesmo ignorando o contexto,
+  conta como `DOWN` dentro do prazo.
+
+### Middlewares e logs
+
+Ordem, de fora para dentro: correlação, log de acesso, recuperação de panic.
+
+- **Log de acesso:** uma linha por requisição, com `method`, `route` (o padrão da rota, como
+  `/wagering/transactions`, nunca o caminho com IDs), `status`, `durationMs` e
+  `correlationId`. Nunca registra corpo, valores monetários, tokens, a chave de idempotência
+  nem IDs de carteira ou jogador.
+- **Panic:** vira 500 genérico em `problem+json`, e o servidor continua atendendo. O log
+  registra o tipo e a pilha, nunca o valor do panic. Cada resposta traz o `Cache-Control:
+  no-store` e `X-Content-Type-Options: nosniff`.
+- Erros 5xx e 503 são registrados com método, caminho, status e erro, sem payload financeiro.
+
+### Evidência
+
+Os testes de integração sobem a borda HTTP real sobre o Service e o Postgres reais. Cobrem:
+o fluxo completo de um provedor (BET, WIN, REFUND, rejeição de um segundo REFUND,
+consultas, ledger e reconciliação); entrada hostil (JSON malformado, números no lugar de
+texto, negativos, notação científica, escala, corpo grande, tipo de mídia errado); a matriz
+de autorização; o isolamento entre provedores; a indisponibilidade de banco como 503; 50
+envios idênticos simultâneos e a disputa de duas apostas de 80,00 sobre 100,00 pela borda.
+O SQS do readiness é substituído por um stand-in nos testes, até a Etapa 6.

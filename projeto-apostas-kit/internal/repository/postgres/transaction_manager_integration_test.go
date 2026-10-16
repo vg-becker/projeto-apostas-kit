@@ -213,3 +213,18 @@ func incrementProbe(connection *postgres.Connection) func(ctx context.Context) e
 		return err
 	}
 }
+
+func TestHealthCheckReflectsTheDatabase(t *testing.T) {
+	pool := startDatabase(t)
+	check := postgres.NewHealthCheck(pool)
+
+	if check.Name() != "postgres" || check.Check(context.Background()) != nil {
+		t.Fatalf("a reachable database must pass, name = %q", check.Name())
+	}
+
+	pool.Close()
+
+	if check.Check(context.Background()) == nil {
+		t.Fatal("a closed pool must fail the check")
+	}
+}

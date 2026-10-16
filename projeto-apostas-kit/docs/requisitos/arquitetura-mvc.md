@@ -25,6 +25,9 @@ Controller ──► Service ──► Model ◄── Repository
 - `service` depende só de `model` (interfaces) — nunca de `repository` concreto.
 - `repository` depende de `model` e de pgx.
 - `controller` depende de `service` e `view`.
+- `view` lê o `model` e também os tipos de resultado e de erro do `service` (por exemplo
+  `OperationResult` e `ErrIdempotencyConflict`), pois traduz esses erros em HTTP; o `service`
+  nunca importa a `view`, então não há ciclo.
 - Fx liga tudo em `internal/platform/fxmodules`; é o único lugar que conhece as implementações concretas.
 
 ## Árvore
