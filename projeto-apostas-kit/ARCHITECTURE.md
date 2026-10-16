@@ -6,10 +6,11 @@ atualizado a cada etapa. Cada seção informa o **estado**:
 - **Implementado**: existe no código e tem testes que passam.
 - **Decidido**: a decisão está tomada, mas o código ainda não existe (etapa indicada).
 
-Estado atual do projeto: **Etapas 0 a 7 concluídas** (esqueleto, Model, Repository com
+Estado atual do projeto: **Etapas 0 a 8 concluídas** (esqueleto, Model, Repository com
 migrations, Service, View, Controller HTTP, autenticação com o Keycloak, mensageria SQS com
-workers, e a composição com Fx, configuração, logs e métricas). Os testes com três processos
-e o README ainda **não foram feitos**; ver "Limitações e trabalho não concluído".
+workers, composição com Fx, configuração, logs e métricas, e os testes de concorrência e
+recuperação com três instâncias reais). Só o README (Etapa 9) ainda **não foi feito**; ver
+"Limitações e trabalho não concluído".
 
 ## 1. Mapeamento MVC + Service
 
@@ -83,8 +84,8 @@ carteira não existe; os dois casos não são distinguidos.
 resultam em 20 processadas e 10 rejeitadas, sem saldo negativo; duas apostas de 80,00 sobre
 100,00 resultam em uma processada, uma rejeitada, saldo 20,00 e um único débito. Em todos os
 casos o saldo armazenado bate com o ledger reconstruído. Esses são ensaios no nível do
-repositório, em um único processo; o teste exigido com **três processos independentes** é
-trabalho da Etapa 8.
+repositório, em um único processo. Os mesmos cenários, com **três processos independentes**,
+estão na seção 17.
 
 ## 4. Transações, estados e falhas (Implementado no Model)
 
@@ -481,8 +482,18 @@ aceita tráfego antes do schema existir. As migrations já criadas nunca são ed
 ### Logs
 
 `log/slog` em JSON, uma linha por registro, em stdout. Nunca levam corpo de requisição, valores
-monetários, tokens, chave de idempotência nem a senha do banco; os campos de negócio são
-identificadores de correlação (`correlationId`, `messageId`, `groupId`).
+monetários, saldos, tokens, chave de idempotência nem a senha do banco. Cada operação processada
+deixa uma linha `operation` com `source`, `kind`, `result`, `status`, `failureCode` e os
+identificadores de rastreio `correlationId`, `messageId` (só para mensagens), `transactionId`,
+`walletId` e `providerId`; o nível segue o resultado (`info` para aplicada, replay e duplicata;
+`warn` para conflito de idempotência, entrada inválida e falha transitória; `error` para
+conflito de concorrência e erro desconhecido). Uma reconciliação divergente é registrada como
+`error`. Há um teste no app real que confere os identificadores e a ausência de valores.
+
+O `Service` recebe um `Observer` opcional (`service.Observer`): a operação é observada **depois
+do commit** (na mensagem, depois da transação da inbox, para não contar o que sofreu rollback),
+e o resolver, o resumer e a reconciliação também o notificam. Métricas e log são dois
+observers combinados no Fx.
 
 ### Métricas (`GET /metrics`)
 
@@ -498,6 +509,10 @@ e do processo:
 | `sqs_consumer_dead_letters_total` | `reason` | envios à DLQ, por motivo |
 | `worker_iterations_total` | `worker`, `outcome` (`ok`, `error`, `panic`) | iterações dos workers |
 | `worker_iteration_duration_seconds` | `worker` | duração das iterações |
+| `operations_total` | `source`, `kind`, `result`, `status`, `failure_code` | cada operação processada (`source`: `request`, `message`, `pending_reference`, `pending`; `result`: `applied`, `replay`, `duplicate`, `idempotency_conflict`, `concurrency_conflict`, `invalid`, `transient`, `error`) |
+| `operation_duration_seconds` | `source`, `result` | tempo de processamento, com a transação |
+| `reconciliations_total` | `result` (`consistent`, `divergent`) | conferências de saldo contra o ledger |
+| `reconciliation_divergences_total` | | divergências (deve ser zero) |
 | `outbox_pending_events` | | eventos ainda não publicados |
 | `outbox_oldest_pending_age_seconds` | | idade do evento mais antigo |
 | `sqs_dead_letter_queue_messages` | | mensagens na DLQ (aproximado) |
@@ -597,11 +612,17 @@ mensagem é uma única transação SQL: inbox, operação, ledger, saldo e event
   teste de consistência garante que as duas listas não divergem. Transitório tem precedência.
   O que não é reconhecido conta como transitório (a opção conservadora: a mensagem espera e
   chega à DLQ pelo broker, em vez de ser descartada).
-- **SIGTERM / `Stop(ctx)`:** para de receber na hora; as mensagens recebidas e **ainda não
-  iniciadas** são devolvidas à fila (`ChangeMessageVisibility` 0); as em andamento terminam
-  dentro do prazo; vencido o prazo, o trabalho é **abandonado** (o contexto é cancelado, a
-  transação SQL faz rollback e não sobra efeito parcial) e as mensagens voltam à fila. Nada é
-  recebido depois do `Stop`.
+- **SIGTERM / `Stop(ctx)`:** para de receber; a espera longa (`ReceiveMessage`) **em andamento
+  não é cancelada**, termina sozinha (no máximo `WaitSeconds`, 10 s) e o que ela devolver depois
+  do `Stop` é liberado na hora, sem ser tratado. Motivo: um `ReceiveMessage` cancelado continua
+  registrado no broker, que lhe entrega a próxima mensagem; ela ficaria invisível até o
+  `VisibilityTimeout` (60 s) e travaria o grupo FIFO da carteira (comprovado no LocalStack, e
+  corrigido na Etapa 8). As mensagens recebidas e **ainda não iniciadas** são devolvidas à fila
+  (`ChangeMessageVisibility` 0); as em andamento terminam dentro do prazo; vencido o prazo, o
+  trabalho é **abandonado** (o contexto é cancelado, a transação SQL faz rollback e não sobra
+  efeito parcial) e as mensagens voltam à fila. Nada é tratado depois do `Stop`. Consequência:
+  o desligamento pode levar até `WaitSeconds` com a fila ociosa, então `APP_SHUTDOWN_TIMEOUT`
+  deve ser maior que isso (o padrão, 30 s, é).
 - **Observabilidade:** um `Observer` recebe cada desfecho (`applied`, `duplicate`, `retried`,
   `dead_lettered`, `released`, `delete_failed`) para as métricas (seção 11). Os logs levam
   `messageId`, `groupId`, `receiveCount` e o desfecho, nunca o corpo.
@@ -693,15 +714,13 @@ broker inalcançável).
 
 Não concluído (previsto em `docs/PLANO.md`):
 
-- **Etapa 8:** testes com três processos, falhas entre commit e publicação, reinício.
 - **Etapa 9:** `README.md` (pré-requisitos, variáveis, filas, aplicação e reversão das
   migrations, exemplos de chamada).
 
 O serviço é executável (`cmd/api`) e está testado de ponta a ponta: HTTP autenticado,
 consumidor SQS, workers, publicação de eventos, migrations na partida e SIGTERM no binário
-real. Os itens eliminatórios que dependem das etapas acima, como os testes com três instâncias
-independentes, ainda não foram atendidos. Os testes de concorrência
-atuais rodam em um único processo; o teste exigido, com três processos, é da Etapa 8.
+real, e a concorrência e a recuperação foram demonstradas com três instâncias independentes
+(seção 17).
 
 Limitações conhecidas já registradas:
 
@@ -733,12 +752,23 @@ Limitações conhecidas já registradas:
   atraso da outbox e o tamanho da DLQ vão só para as métricas, não para o readiness.
 - Sem limite de requisições por provedor (rate limiting). `/metrics` é público no servidor de
   negócio; quem precisar restringi-lo deve fazê-lo na borda (rede ou proxy).
-- **Reinício sob carga:** o `Stop` cancela o `ReceiveMessage` em andamento. Se o broker já
-  tinha entregue uma mensagem naquela chamada, ela fica invisível até o `VisibilityTimeout` de
-  60 s e só então volta (nada se perde nem duplica, mas essa mensagem atrasa até 1 minuto). Foi
-  observado no teste de reinício: em cinco execuções, 199 de 200 mensagens já estavam
-  concluídas no `Stop`, e a última chegou na hora ou 61 s depois. Esperar a recepção terminar
-  eliminaria o atraso ao custo de até `WaitSeconds` (10 s) a mais no desligamento.
+- **Desligamento com a fila ociosa:** o consumidor espera a recepção em andamento terminar (até
+  10 s) antes de parar (seção 12); em troca, nenhuma mensagem é engolida por uma espera
+  cancelada. Uma queda sem desligamento (`SIGKILL`) deixa as mensagens que a instância tinha em
+  mãos invisíveis até o `VisibilityTimeout` (60 s), quando voltam e a inbox as trata uma só vez.
+- **Expiração de referência com instâncias reais:** a expiração por TTL ou tentativas é provada
+  nos testes de Service com banco real, mas não nos testes de cluster: a política (10 tentativas,
+  TTL de 10 minutos) não é configurável por variável de ambiente, e esperar isso com três
+  processos tornaria o teste lento. A resolução posterior da referência, essa sim, é provada
+  com três instâncias.
+- **Aceite assíncrono:** a API HTTP é síncrona (200, 202 só para referência pendente, 422), então
+  o cenário "interromper depois de confirmar PENDING" do enunciado não se aplica; as `PENDING`
+  abandonadas por uma queda no meio da transação não existem (a transação faz rollback), e o
+  `PendingResumer` cobre o caso defensivo, testado no Service.
+- **Conflitos de concorrência:** a carteira é bloqueada (`FOR UPDATE`) antes de ser lida, então
+  não há conflito otimista a contar nem repetir. A métrica `operations_total` com
+  `result="concurrency_conflict"` (conflito de versão) é um alarme que deve ficar em zero; o
+  conflito que existe de fato, o de idempotência, aparece como `idempotency_conflict`.
 - As migrations aplicadas na partida não têm "down" automático: a reversão é manual, com a
   ferramenta `migrate` (ver README, Etapa 9).
 - Os testes com o Keycloak real baixam a imagem (cerca de 500 MB) e sobem o IdP uma vez por
@@ -884,3 +914,46 @@ de autorização; o isolamento entre provedores; a indisponibilidade de banco co
 envios idênticos simultâneos e a disputa de duas apostas de 80,00 sobre 100,00 pela borda.
 O readiness dos testes de `controller/http` usa um stand-in para o SQS; o readiness com o
 broker real é verificado em `test/integration`.
+
+## 17. Concorrência e recuperação com três instâncias (Implementado, Etapa 8)
+
+`test/integration/cluster_test.go` compila o `cmd/api` **com `-race`** e sobe **três processos
+independentes** (memória, pool de conexões e consumidor próprios) sobre o mesmo Postgres, as
+mesmas filas e o mesmo Keycloak, todos em containers reais. Ao fim de cada cenário, cada
+instância recebe SIGTERM e precisa sair com status 0 e sem nenhum log de nível `error`; uma
+corrida de dados em qualquer processo também derruba o teste. Todo cenário termina com a
+**conferência final**: o saldo armazenado de cada carteira contra a soma de créditos menos
+débitos do ledger, nenhuma transação presa em `PENDING` ou `PENDING_REFERENCE`, e cada evento da
+outbox entregue na fila de saída **exatamente uma vez**.
+
+| Cenário | O que demonstra |
+|---|---|
+| 50 requisições idênticas espalhadas nas 3 instâncias | um único original e 49 replays, uma transação, um débito |
+| duas apostas de 80,00 sobre 100,00, cada uma em uma instância, em 15 carteiras | um 200 e um 422, um `PROCESSED` e um `REJECTED` (`INSUFFICIENT_FUNDS`), saldo 20,00, um débito; reenviar em outras instâncias não altera nada |
+| 24 carteiras em paralelo, HTTP e SQS misturados | débitos e saldos exatos; as métricas de cada instância mostram que todas atenderam |
+| a mesma operação por HTTP e por três mensagens SQS, ao mesmo tempo | um débito por carteira (inbox + unicidade do banco) |
+| `SIGKILL` em uma instância no meio do tráfego, com clientes repetindo em outra | as mensagens que ela tinha voltam depois do `VisibilityTimeout`; as requisições repetidas viram replays; nada se perde nem duplica |
+| todas as instâncias derrubadas com eventos reservados (49 a 100 por execução) | os leases de publishers mortos vencem e as instâncias novas publicam cada evento uma só vez |
+| REFUND e ROLLBACK chegando **antes** da aposta, por HTTP e por SQS, em instâncias diferentes | ficam `PENDING_REFERENCE` (202), o worker de alguma instância os conclui quando a aposta chega a outra; o saldo volta ao inicial; um evento de espera e uma resolução por estorno (conferidos nas métricas) |
+| troca de todas as instâncias (SIGTERM e novas sobre o mesmo banco) | as mesmas requisições são replays com a transação original; a mesma chave com outro valor continua sendo `409 IDEMPOTENCY_CONFLICT`; saldos intactos |
+| reinício no meio do tráfego, com mensagens chegando durante o `Stop` | 5 a 8 de 200 concluídas no `Stop`; o resto termina em cerca de 1 s depois; saldos, ledger e eventos exatos |
+
+Os cenários de dois publishers disputando a outbox estão cobertos por todos os acima (cada
+instância roda o seu publisher) e, no nível do Service, pelos testes de reivindicação com
+`SKIP LOCKED`. A queda depois do commit e antes de apagar a mensagem está provada no nível do
+consumidor (seção 12) e, com o binário real, pelo cenário do `SIGKILL`.
+
+**Como executar:** `go test -tags=integration -race ./test/integration/...` (os cenários de
+cluster levam de alguns segundos a cerca de 75 s cada; o do `SIGKILL` espera o
+`VisibilityTimeout`).
+
+**Defeitos que esses testes encontraram:**
+
+- `OutboxRepository.Claim` devolvia eventos fora de ordem (corrigido na Etapa 6, seção 9).
+- Um `ReceiveMessage` cancelado no `Stop` engolia a mensagem seguinte e travava o grupo FIFO por
+  60 s (corrigido, seção 12). Antes da correção, o teste de reinício levava 61 s depois do
+  `Stop`; agora leva cerca de 1 s.
+- Dois defeitos dos próprios testes, registrados porque custaram tempo: identificadores
+  derivados do prefixo de um UUIDv7 colidem entre carteiras criadas no mesmo instante (o serviço
+  recusou corretamente como `hash_conflict`), e um teste de reinício que envia as mensagens
+  antes de armar o gatilho nunca para no meio do tráfego.

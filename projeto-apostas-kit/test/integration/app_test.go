@@ -69,7 +69,7 @@ func (environment appEnvironment) variables(databaseURL string, httpAddr string)
 
 	return map[string]string{
 		"APP_HTTP_ADDR":         httpAddr,
-		"APP_SHUTDOWN_TIMEOUT":  "10s",
+		"APP_SHUTDOWN_TIMEOUT":  "20s",
 		"DATABASE_URL":          databaseURL,
 		"AWS_REGION":            sqsConfig.Region,
 		"AWS_ACCESS_KEY_ID":     sqsConfig.AccessKeyID,
@@ -315,7 +315,9 @@ func TestARestartInTheMiddleOfTheTrafficLosesAndDuplicatesNothing(t *testing.T) 
 
 	defer second.app.RequireStop()
 
-	if !waitFor(120*time.Second, func() bool { return environment.completedMessages(t) == totalMessages }) {
+	// bem abaixo do VisibilityTimeout (60 s): uma recepção cancelada no Stop engoliria as
+	// mensagens por esse tempo
+	if !waitFor(40*time.Second, func() bool { return environment.completedMessages(t) == totalMessages }) {
 		t.Fatalf("not every message completed: %s\nfirst app logs:\n%s\nsecond app logs:\n%s",
 			environment.describe(t), first.logs.String(), second.logs.String())
 	}

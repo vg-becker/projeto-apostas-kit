@@ -6,6 +6,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
@@ -94,6 +97,8 @@ type instance struct {
 	command *exec.Cmd
 	logs    *lockedBuffer
 	exited  chan error
+	// killed marca a instância derrubada com SIGKILL: não há desligamento a conferir.
+	killed bool
 }
 
 // cluster são várias instâncias do serviço sobre o mesmo banco, as mesmas filas e o mesmo
@@ -156,26 +161,37 @@ func (running *cluster) start(t *testing.T, binary string) *instance {
 	return started
 }
 
-// shutDown encerra cada instância com SIGTERM e confere que saiu com status 0 e sem nenhum
-// registro de erro nos logs: um erro registrado durante um teste é um defeito.
+// shutDown encerra todas as instâncias com SIGTERM, ao mesmo tempo, e confere que cada uma
+// saiu com status 0 e sem nenhum registro de erro nos logs: um erro registrado durante um
+// teste é um defeito.
 func (running *cluster) shutDown(t *testing.T) {
+	for _, started := range running.instances {
+		if !started.killed {
+			_ = started.command.Process.Signal(syscall.SIGTERM)
+		}
+	}
+
 	for index, started := range running.instances {
-		_ = started.command.Process.Signal(syscall.SIGTERM)
-
-		select {
-		case err := <-started.exited:
-			if err != nil {
-				t.Errorf("instance %d did not exit cleanly: %v\n%s", index, err, started.logs.String())
-			}
-		case <-time.After(40 * time.Second):
-			_ = started.command.Process.Kill()
-
-			t.Errorf("instance %d did not stop after SIGTERM\n%s", index, started.logs.String())
+		if !started.killed {
+			waitForCleanExit(t, index, started)
 		}
+	}
+}
 
-		if lines := errorLines(started.logs.String()); len(lines) > 0 {
-			t.Errorf("instance %d logged errors:\n%s", index, strings.Join(lines, "\n"))
+func waitForCleanExit(t *testing.T, index int, started *instance) {
+	select {
+	case err := <-started.exited:
+		if err != nil {
+			t.Errorf("instance %d did not exit cleanly: %v\n%s", index, err, started.logs.String())
 		}
+	case <-time.After(40 * time.Second):
+		_ = started.command.Process.Kill()
+
+		t.Errorf("instance %d did not stop after SIGTERM\n%s", index, started.logs.String())
+	}
+
+	if lines := errorLines(started.logs.String()); len(lines) > 0 {
+		t.Errorf("instance %d logged errors:\n%s", index, strings.Join(lines, "\n"))
 	}
 }
 
@@ -322,6 +338,142 @@ func (environment appEnvironment) sendBet(
 	_, err := environment.client.Send(context.Background(), sqsclient.SendParams{
 		QueueURL:        environment.queues.Requests,
 		Body:            sqsBody(messageID, wallet, external, amount),
+		GroupID:         wallet.id,
+		DeduplicationID: randomID(),
+	})
+	if err != nil {
+		t.Errorf("send %s: %v", messageID, err)
+	}
+}
+
+// kill derruba a instância com SIGKILL, como uma queda de máquina: sem desligamento, sem
+// liberar mensagens, sem devolver locks de aplicação.
+func (running *cluster) kill(t *testing.T, index int) {
+	t.Helper()
+
+	target := running.instances[index]
+	target.killed = true
+
+	if err := target.command.Process.Kill(); err != nil {
+		t.Fatalf("kill instance %d: %v", index, err)
+	}
+
+	select {
+	case <-target.exited:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("instance %d did not die", index)
+	}
+}
+
+// restart desliga todas as instâncias (cada uma deve sair com status 0) e sobe outras tantas,
+// novas, sobre o mesmo banco e as mesmas filas.
+func (running *cluster) restart(t *testing.T) {
+	t.Helper()
+
+	running.shutDown(t)
+
+	binary := serviceBinary(t)
+	fresh := make([]*instance, len(running.instances))
+
+	for index := range fresh {
+		fresh[index] = running.start(t, binary)
+	}
+
+	for _, started := range fresh {
+		waitUntilReady(t, "http://"+started.address, started.exited, &bytes.Buffer{})
+	}
+
+	running.instances = fresh
+}
+
+// trySubmit envia uma operação a uma instância sem encerrar o teste se a conexão falhar: um
+// cliente de verdade tenta de novo, em outra instância, com a mesma chave.
+func (running *cluster) trySubmit(
+	instance int,
+	token string,
+	key string,
+	body string,
+) (reply, error) {
+	target := running.instances[instance%len(running.instances)]
+
+	request, err := http.NewRequest(http.MethodPost, "http://"+target.address+"/wagering/transactions", strings.NewReader(body))
+	if err != nil {
+		return reply{}, err
+	}
+
+	request.Header.Set("Authorization", token)
+	request.Header.Set("Idempotency-Key", key)
+	request.Header.Set("Content-Type", "application/json")
+
+	response, err := (&http.Client{Timeout: 15 * time.Second}).Do(request)
+	if err != nil {
+		return reply{}, err
+	}
+
+	defer func() { _ = response.Body.Close() }()
+
+	payload, err := io.ReadAll(response.Body)
+
+	return reply{status: response.StatusCode, header: response.Header, body: payload}, err
+}
+
+// submitUntilAnswered repete a mesma operação, com a mesma chave, passando por todas as
+// instâncias, até uma resposta que não seja falha de conexão nem 5xx.
+func (running *cluster) submitUntilAnswered(
+	t *testing.T,
+	first int,
+	token string,
+	key string,
+	body string,
+) reply {
+	t.Helper()
+
+	for attempt := range 30 {
+		response, err := running.trySubmit(first+attempt, token, key, body)
+		if err == nil && response.status < http.StatusInternalServerError {
+			return response
+		}
+
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	t.Errorf("no instance answered %s", key)
+
+	return reply{}
+}
+
+// referencingBody monta um estorno (REFUND ou ROLLBACK) que referencia uma aposta do provider-a.
+func referencingBody(wallet walletRef, external string, kind string, amount string, reference string) string {
+	return fmt.Sprintf(
+		`{"providerId":"provider-a","externalTransactionId":%q,"playerId":%q,"walletId":%q,`+
+			`"roundId":"round-1","gameId":"game-1","kind":%q,"money":{"amount":%q,"currency":"BRL"},`+
+			`"referenceExternalTransactionId":%q}`,
+		external, wallet.playerID, wallet.id, kind, amount, reference,
+	)
+}
+
+// sendReversal publica um estorno do provider-a na fila de operações.
+func (environment appEnvironment) sendReversal(
+	t *testing.T,
+	wallet walletRef,
+	messageID string,
+	external string,
+	kind string,
+	reference string,
+) {
+	t.Helper()
+
+	body := fmt.Sprintf(
+		`{"messageId":%q,"type":"WagerTransactionRequested","occurredAt":"2026-09-08T12:00:00.000Z",`+
+			`"data":{"providerId":"provider-a","externalTransactionId":%q,"idempotencyKey":%q,`+
+			`"playerId":%q,"walletId":%q,"roundId":"round-1","gameId":"game-1","kind":%q,`+
+			`"money":{"amount":"5.00","currency":"BRL"},"referenceExternalTransactionId":%q}}`,
+		messageID, external, "provider-a:"+external, wallet.playerID, wallet.id, kind, reference,
+	)
+
+	_, err := environment.client.Send(context.Background(), sqsclient.SendParams{
+		QueueURL:        environment.queues.Requests,
+		Body:            body,
 		GroupID:         wallet.id,
 		DeduplicationID: randomID(),
 	})

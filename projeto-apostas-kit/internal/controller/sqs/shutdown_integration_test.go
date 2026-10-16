@@ -147,3 +147,36 @@ func TestStopIsIdempotent(t *testing.T) {
 		t.Fatalf("Start after Stop error = %v, want %v", err, sqs.ErrAlreadyStarted)
 	}
 }
+
+// Um ReceiveMessage cancelado pelo Stop continua registrado no broker, que entrega a próxima
+// mensagem à requisição abandonada: ela fica invisível até o VisibilityTimeout e trava o grupo
+// FIFO. O Stop espera a recepção em andamento terminar, então nada é engolido.
+func TestAStopWhileIdleDoesNotLeaveALongPollThatSwallowsTheNextMessage(t *testing.T) {
+	f := newFixture(t, fixtureOptions{
+		configure: func(config *sqs.Config) { config.WaitSeconds = 5 },
+	})
+	wallet := f.openWallet(t, 100000)
+
+	time.Sleep(time.Second) // o consumidor ocioso já está dentro de uma espera longa
+
+	started := time.Now()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := f.consumer.Stop(ctx); err != nil {
+		t.Fatalf("Stop error = %v", err)
+	}
+
+	if took := time.Since(started); took > 8*time.Second {
+		t.Fatalf("Stop took %v: it may wait for the long poll (5 s), not longer", took)
+	}
+
+	f.publish(t, wallet.id, body("msg-after-stop", wallet, "tx-1", "BET", "5.00"))
+
+	f.eventually(t, 5*time.Second, "the message sent after the stop stays visible", func() bool {
+		visible, inFlight := f.depth(t, f.queues.Requests)
+
+		return visible == 1 && inFlight == 0
+	})
+}

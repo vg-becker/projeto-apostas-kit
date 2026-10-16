@@ -111,8 +111,12 @@ func (consumer *Consumer) Start() error {
 }
 
 // Stop para de receber, devolve à fila o que não foi iniciado e espera o trabalho em
-// andamento até o prazo de ctx. Vencido o prazo, o trabalho é abandonado (a transação
-// SQL faz rollback), as mensagens são devolvidas à fila e o erro é ErrShutdownTimeout.
+// andamento até o prazo de ctx. A recepção em andamento não é cancelada: ela termina sozinha
+// (no máximo WaitSeconds) e o que devolver é liberado na hora, porque um ReceiveMessage
+// cancelado continua registrado no broker, que lhe entregaria a próxima mensagem; ela ficaria
+// invisível até o VisibilityTimeout, travando o grupo FIFO. Vencido o prazo, o trabalho é
+// abandonado (a transação SQL faz rollback), as mensagens são devolvidas à fila e o erro é
+// ErrShutdownTimeout.
 func (consumer *Consumer) Stop(ctx context.Context) error {
 	consumer.mutex.Lock()
 	started, done := consumer.started, consumer.done
@@ -153,7 +157,7 @@ func (consumer *Consumer) run(runContext context.Context, workContext context.Co
 			return
 		}
 
-		messages, err := consumer.receive(runContext, free)
+		messages, err := consumer.receive(workContext, free)
 		if err != nil {
 			failures++
 			consumer.afterReceiveFailure(runContext, err, failures)
